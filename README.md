@@ -49,19 +49,19 @@ Run the all-in-one pipeline (analyze → suggest → apply) with one command:
 ```bash
 # OpenAI example
 export OPENAI_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify   --provider openai   --model gpt-4o-mini   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider openai --model gpt-4o-mini samples/src samples/out
 ```
 
 ```bash
 # DeepSeek example
 export DEEPSEEK_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify   --provider deepseek   --model deepseek-chat   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider deepseek --model deepseek-chat samples/src samples/out
 ```
 
 ```bash
 # Local (Ollama) example
 # make sure model is pulled: ollama run llama3.1:8b    
-java -jar target/java-humanify-*.jar humanify   --provider local   --local-api ollama   --endpoint http://localhost:11434   --model llama3.1:8b   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider local --local-api ollama --endpoint http://localhost:11434 --model llama3.1:8b samples/src samples/out
 ```
 
 ⸻
@@ -72,7 +72,7 @@ You can also run the steps individually:
 
 ### 1) Analyze
 ```bash
-java -jar java-humanify.jar analyze <srcDir> <snippets.json>   [--maxBodyLen 1600] [--includeStrings true] [--exclude "glob/**"]
+java -jar java-humanify.jar analyze <srcDir> <snippets.json> [--maxBodyLen 1600] [--includeStrings true] [--exclude "glob/**"]
 ```
 
 Generates `snippets.json` with per-method code & metadata (package, FQN, signature, strings).
@@ -81,7 +81,7 @@ Generates `snippets.json` with per-method code & metadata (package, FQN, signatu
 
 ### 2) Suggest
 ```bash
-java -jar java-humanify.jar suggest <snippets.json> <mapping.json>   [--provider dummy|openai|deepseek|local]   [--model gpt-4o-mini|deepseek-chat|<local-model>]   [--batch 12]   [--endpoint http://localhost:11434]   [--local-api ollama|openai]   [--timeout-sec 180] 
+java -jar java-humanify.jar suggest <snippets.json> <mapping.json> [--provider dummy|openai|deepseek|local] [--model gpt-4o-mini|deepseek-chat|<local-model>] [--batch 12] [--endpoint http://localhost:11434] [--local-api ollama|openai] [--timeout-sec 180] 
 ```
 
 Auth options:  
@@ -93,7 +93,7 @@ Auth options:
 
 ### 3) Apply
 ```bash
-java -jar java-humanify.jar apply <srcDir> <mapping.json> <outDir>   [--classpath jarOrDir[:morePaths]]
+java -jar java-humanify.jar apply <srcDir> <mapping.json> <outDir> [--classpath jarOrDir[:morePaths]]
 ```
 
 Updates class names, constructors, imports, annotations, new expressions, methods, fields, locals (with conflict checks), and file names.  
