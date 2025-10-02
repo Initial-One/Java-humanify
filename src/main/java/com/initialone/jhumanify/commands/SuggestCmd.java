@@ -60,11 +60,6 @@ public class SuggestCmd implements Runnable {
     @CommandLine.Option(names = "--ds-key", description = "DeepSeek API key (fallback to env DEEPSEEK_API_KEY)")
     String dsKey;
 
-    /* 默认直接帮你开 kv 预设（可改回 none） */
-    @CommandLine.Option(names = "--preset", defaultValue = "kv",
-            description = "Optional semantic preset: none|adder|kv")
-    String preset;
-
     /* ======== 输入数据结构 ======== */
     static class Snippet {
         public String file;
@@ -134,10 +129,7 @@ public class SuggestCmd implements Runnable {
             Allowed allow = buildAllowed(snippets);
             mapping = sanitizeAndFill(mapping, allow, snippets);
 
-            // 3) 预设纠偏（kv 会补上：含 main 的类 -> Cli；P/G/K -> put/get/listKeys；e/d -> encodeKey/decodeKey；v0 -> Entry）
-            mapping = postProcessPreset(mapping, snippets, preset);
-
-            // 4) 统一写盘（只写一次）
+            // 3) 统一写盘（只写一次）
             om.writeValue(Path.of(mappingJson).toFile(), mapping);
             System.out.println("[suggest] mapping -> " + mappingJson);
         } catch (Exception e) {
