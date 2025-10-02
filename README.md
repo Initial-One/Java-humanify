@@ -32,15 +32,15 @@ They only propose names. The renaming is applied by JavaParser on the AST, with 
 
 ⸻
 
-## ✨ Highlights
+## Highlights
 
-- 🧠 **Pluggable LLMs**: OpenAI / DeepSeek / Local (Ollama, OpenAI-compatible)  
-- 🧩 **Signature-accurate renames** (classFqn, methodSig, fieldFqn, with fallback)  
-- 🧪 Works well on small-to-medium projects; robust AST transforms keep code compiling  
+- **Pluggable LLMs**: OpenAI / DeepSeek / Local (Ollama, OpenAI-compatible)  
+- **Signature-accurate renames** (classFqn, methodSig, fieldFqn, with fallback)  
+- Works well on small-to-medium projects; robust AST transforms keep code compiling  
 
 ⸻
 
-## 🚀 Quick start
+## Quick start
 
 Run the all-in-one pipeline (analyze → suggest → apply) with one command:
 
@@ -75,7 +75,7 @@ samples/src samples/out
 
 ⸻
 
-## 🔧 CLI commands
+## CLI commands
 
 You can also run the steps individually:
 
@@ -131,7 +131,7 @@ Creates intermediate `_pass1` (after class renames), then final output in `<outD
 
 ⸻
 
-## ⚙️ How it works
+## How it works
 
 1. **Analyze** – collect per-method “snippets”: declaration, body, strings, exact methodSig, classFqn.  
 2. **Suggest** – LLM (or heuristic) returns a mapping object:  
@@ -143,7 +143,7 @@ Creates intermediate `_pass1` (after class renames), then final output in `<outD
 
 ⸻
 
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 - **google-java-format / module access error**  
   Add JVM flag:  
@@ -160,14 +160,14 @@ Creates intermediate `_pass1` (after class renames), then final output in `<outD
 
 ⸻
 
-## 📊 Performance & Costs
+## Performance & Costs
 
 - Suggestion cost depends on text size; small projects are cheap.  
 - Local models are free but slower & less accurate.  
 
 ⸻
 
-## 🤝 Contributing
+## Contributing
 
 Issues and PRs are welcome! Please:  
 - Use feature branches  
@@ -176,7 +176,7 @@ Issues and PRs are welcome! Please:
 
 ⸻
 
-## 📜 License
+## License
 
 This project is licensed under the **Apache-2.0 License**.  
 Copyright (c) 2025 Initial-One  
@@ -185,7 +185,7 @@ See [LICENSE](./LICENSE) for details.
 
 ⸻
 
-## 📎 Appendix: CLI help (short)
+## Appendix: CLI help (short)
 
 ```bash
 java -jar java-humanify.jar analyze <srcDir> <snippets.json> [opts]
@@ -194,4 +194,4 @@ java -jar java-humanify.jar apply   <srcDir> <mapping.json> <outDir> [--classpat
 java -jar java-humanify.jar humanify [provider/model/...] <srcDir> <outDir>
 ```
 
-Happy humanifying! 🎉
+Happy humanifying!
