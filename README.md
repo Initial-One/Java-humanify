@@ -12,18 +12,38 @@ Inspired by **HumanifyJS** — but for Java bytecode turned into decompiled sour
 Decompiled / minified / obfuscated Java is painful to read:
 
 ```java
-public class Foo {
-  private int a;
-  public int b(int x) { int c = x + a; return c; }
-}
+package demo.mix;public final class a{private static final int[] O={0,1,1,2};private a(){}public static int h(String s){long x=0x811c9dc5L;if(s==null)return 0;int i=0,n=s.length(),j=O[2];while(i<n){char c=s.charAt(i++);x^=c;x*=0x01000193L;x&=0xffffffffL;j^=(c<<1);j^=j>>>7;if((i&3)==0)x^=(j&0xff);}return (int)x;}}
 ```
 
 Java Humanify renames the identifiers coherently:
 
 ```java
-public class Adder {
-  private int base;
-  public int add(int value) { int sum = value + base; return sum; }
+package demo.mix;
+
+public final class HashCalculator {
+
+    private static final int[] O = { 0, 1, 1, 2 };
+
+    private HashCalculator() {
+    }
+
+    public static int calculateHash(String inputString) {
+        long storedValue = 0x811c9dc5L;
+        if (inputString == null)
+            return 0;
+        int i = 0, n = inputString.length(), state = O[2];
+        while (i < n) {
+            char character = inputString.charAt(i++);
+            storedValue ^= character;
+            storedValue *= 0x01000193L;
+            storedValue &= 0xffffffffL;
+            state ^= (character << 1);
+            state ^= state >>> 7;
+            if ((i & 3) == 0)
+                storedValue ^= (state & 0xff);
+        }
+        return (int) storedValue;
+    }
 }
 ```
 
