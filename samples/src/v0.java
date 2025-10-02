@@ -1,0 +1,1 @@
+package demo.mix;public final class v0{final String v;final long e;v0(String v,long e){this.v=v;this.e=e;}}

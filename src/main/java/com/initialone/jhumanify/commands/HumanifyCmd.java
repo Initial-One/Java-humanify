@@ -1,0 +1,173 @@
+package com.initialone.jhumanify.commands;
+
+import com.initialone.jhumanify.util.Formatter;
+import picocli.CommandLine;
+
+import java.nio.file.*;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * 一条命令串行执行：analyze -> suggest -> apply
+ *
+ * 用法：
+ *   java -jar java-humanify.jar humanify \
+ *     --provider local --local-api ollama --endpoint http://localhost:11434 \
+ *     --model qwen2.5:1.5b \
+ *     samples/src samples/out-humanified
+ */
+@CommandLine.Command(
+        name = "humanify",
+        description = "Run analyze -> suggest -> apply in one shot"
+)
+public class HumanifyCmd implements Runnable {
+
+    /* 必选参数 */
+    @CommandLine.Parameters(index = "0", description = "Input source dir")
+    String srcDir;
+
+    @CommandLine.Parameters(index = "1", description = "Output dir")
+    String outDir;
+
+    /* 建议阶段参数（与 SuggestCmd 保持一致） */
+    @CommandLine.Option(names = "--provider", defaultValue = "dummy",
+            description = "dummy|openai|local")
+    String provider;
+
+    @CommandLine.Option(names = "--model", defaultValue = "gpt-4o-mini",
+            description = "Model name (OpenAI 或本地兼容/ollama 的模型名)")
+    String model;
+
+    @CommandLine.Option(names = "--batch", defaultValue = "12",
+            description = "Max snippets per LLM batch")
+    int batch;
+
+    @CommandLine.Option(names = "--local-api", defaultValue = "ollama",
+            description = "When --provider=local: openai|ollama")
+    String localApi;
+
+    @CommandLine.Option(names = "--endpoint", defaultValue = "http://localhost:11434",
+            description = "Local endpoint. OpenAI-compat: http://localhost:1234/v1; Ollama: http://localhost:11434")
+    String endpoint;
+
+    /* 应用阶段参数（与 ApplyCmd 保持一致） */
+    @CommandLine.Option(names = "--classpath", split = ":", description = "Extra classpath jars/dirs, separated by ':'")
+    List<String> classpath = new ArrayList<>();
+
+    /* 中间产物控制 */
+    @CommandLine.Option(names = "--snippets", description = "Optional path to write snippets.json (default: <outDir>/snippets.json)")
+    String snippetsPathOpt;
+
+    @CommandLine.Option(names = "--mapping", description = "Optional path to write mapping.json (default: <outDir>/mapping.json)")
+    String mappingPathOpt;
+
+    @CommandLine.Option(names = "--keep-intermediate", defaultValue = "true",
+            negatable = true,
+            description = "Keep intermediate files (snippets.json, mapping.json). Default: ${DEFAULT-VALUE}")
+    boolean keepIntermediate;
+
+    @CommandLine.Option(names = "--format", defaultValue = "true",
+            negatable = true,
+            description = "Format the output Java files after apply. Default: ${DEFAULT-VALUE}")
+    boolean format;
+
+    @Override
+    public void run() {
+        Path src = Paths.get(srcDir);
+        Path out = Paths.get(outDir);
+
+        try {
+            if (!Files.isDirectory(src)) {
+                throw new CommandLine.ParameterException(new CommandLine(this),
+                        "Input source dir not found: " + srcDir + " (abs: " + src.toAbsolutePath() + ")");
+            }
+            Files.createDirectories(out);
+
+            // 1) 中间产物
+            Path snippets = (snippetsPathOpt != null) ? Paths.get(snippetsPathOpt) : out.resolve("snippets.json");
+            Path mapping  = (mappingPathOpt  != null) ? Paths.get(mappingPathOpt)  : out.resolve("mapping.json");
+            if (snippets.getParent() != null) Files.createDirectories(snippets.getParent());
+            if (mapping.getParent()  != null) Files.createDirectories(mapping.getParent());
+
+            long t0 = System.currentTimeMillis();
+
+            /* ========== 1/3 analyze ========== */
+            System.out.println("[humanify] 1/3 analyze...");
+            List<String> analyzeArgs = List.of(src.toString(), snippets.toString());
+            int rc1 = new CommandLine(new AnalyzeCmd()).execute(analyzeArgs.toArray(new String[0]));
+            if (rc1 != 0) throw new IllegalStateException("analyze failed with code " + rc1);
+            if (!Files.exists(snippets) || Files.size(snippets) == 0)
+                throw new IllegalStateException("snippets.json was not produced: " + snippets);
+
+            /* ========== 2/3 suggest ========== */
+            System.out.println("[humanify] 2/3 suggest (" + provider + ")...");
+            List<String> suggestArgs = new ArrayList<>();
+            // 选项（存在则加入）
+            suggestArgs.addAll(List.of("--provider", provider));
+            suggestArgs.addAll(List.of("--model", model));
+            suggestArgs.addAll(List.of("--batch", Integer.toString(batch)));
+
+            // 仅当 SuggestCmd 声明了这些字段/选项时才附加（避免旧版本没有该选项时报错）
+            if (hasField(SuggestCmd.class, "localApi")) {
+                suggestArgs.addAll(List.of("--local-api", localApi));
+            }
+            if (hasField(SuggestCmd.class, "endpoint")) {
+                suggestArgs.addAll(List.of("--endpoint", endpoint));
+            }
+
+            // 位置参数
+            suggestArgs.add(snippets.toString());
+            suggestArgs.add(mapping.toString());
+
+            int rc2 = new CommandLine(new SuggestCmd()).execute(suggestArgs.toArray(new String[0]));
+            if (rc2 != 0) throw new IllegalStateException("suggest failed with code " + rc2);
+            if (!Files.exists(mapping) || Files.size(mapping) == 0)
+                throw new IllegalStateException("mapping.json was not produced: " + mapping);
+
+            /* ========== 3/3 apply ========== */
+            System.out.println("[humanify] 3/3 apply...");
+            List<String> applyArgs = new ArrayList<>();
+            if (classpath != null && !classpath.isEmpty() && hasField(ApplyCmd.class, "classpath")) {
+                applyArgs.add("--classpath");
+                applyArgs.add(classpath.stream().collect(Collectors.joining(":")));
+            }
+            applyArgs.add(src.toString());
+            applyArgs.add(mapping.toString());
+            applyArgs.add(out.toString());
+
+            int rc3 = new CommandLine(new ApplyCmd()).execute(applyArgs.toArray(new String[0]));
+            if (rc3 != 0) throw new IllegalStateException("apply failed with code " + rc3);
+
+            // 可选格式化
+            if (format) {
+                try {
+                    Formatter.formatTree(out);
+                    System.out.println("[humanify] formatted output.");
+                } catch (Throwable t) {
+                    System.err.println("[humanify] format skipped: " + t.getMessage());
+                }
+            }
+
+            long t1 = System.currentTimeMillis();
+            System.out.printf("[humanify] done in %.2fs -> %s%n", (t1 - t0) / 1000.0, out);
+
+            // 自动清理中间产物（仅在未显式指定路径时，且 keepIntermediate=false）
+            if (!keepIntermediate) {
+                if (snippetsPathOpt == null) safeDelete(snippets);
+                if (mappingPathOpt  == null) safeDelete(mapping);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.exit(2);
+        }
+    }
+
+    private static boolean hasField(Class<?> cls, String name) {
+        try { cls.getDeclaredField(name); return true; }
+        catch (NoSuchFieldException e) { return false; }
+    }
+
+    private static void safeDelete(Path p) {
+        try { Files.deleteIfExists(p); } catch (Exception ignore) {}
+    }
+}

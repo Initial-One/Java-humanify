@@ -1,0 +1,1 @@
+package demo.mix;public final class x0{static long p(String s,long d){try{return Long.parseLong(s);}catch(Exception e){return d;}}private x0(){}}
