@@ -1,5 +1,5 @@
 # Java Humanify
-> Deobfuscate Java code using LLMs ("ChatGPT,LLAMA,DeepSeek,etc")
+> Deobfuscate Java code using LLMs ("ChatGPT,Llama,DeepSeek,etc")
 
 Java Humanify uses large language models (OpenAI, DeepSeek, Ollama, etc.) to suggest better names (classes, methods, fields, locals), while all actual code changes happen on the AST via JavaParser + Symbol Solver so the output remains 1-to-1 equivalent to the input.
 
