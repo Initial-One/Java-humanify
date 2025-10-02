@@ -1,16 +1,14 @@
-# Build
-/target/
-/out/
-/*.log
-
-# IDE
+target/
+build/
+out/
+*.log
 .idea/
-.vscode/
 *.iml
-
-# OS
+.vscode/
 .DS_Store
-
-# Java/Tools
-hs_err_pid*
+samples/**/out*/
+samples/**/*-pass1/
+.env
+.env.*
+*.jar
 *.class
