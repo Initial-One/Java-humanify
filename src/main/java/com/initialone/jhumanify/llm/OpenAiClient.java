@@ -60,23 +60,27 @@ public class OpenAiClient implements LlmClient {
         return all;
     }
 
-    /** 构造对模型友好的严格 JSON 输出提示 */
     private String buildPrompt(List<String> batch) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are a senior Java reverse-engineering assistant.\n")
-                .append("For the following Java snippets, propose better, meaningful names.\n")
-                .append("Return STRICT JSON array; each item:\n")
+                .append("Each snippet starts with a META header containing: packageName, className, classFqn, methodName, methodSignature.\n")
+                .append("Propose semantic renames as a STRICT JSON array; each item:\n")
                 .append("{\"kind\":\"class|method|field|var\",\"oldName\":\"...\",\"newName\":\"...\",\"reason\":\"...\"}\n")
-                .append("Constraints:\n")
-                .append("- Valid Java identifiers only; avoid collisions within scope\n")
-                .append("- Derive semantics from string literals, call sites, types\n")
-                .append("- Keep package unchanged\n\n");
+                .append("Rules:\n")
+                .append("- For class renames, oldName MUST equal META.className (e.g., \"a\").\n")
+                .append("- For method renames, oldName MUST equal META.methodName (e.g., \"O0O0\").\n")
+                .append("- For fields/vars, oldName is the short identifier visible in the code body.\n")
+                .append("- Use CamelCase for classes; lowerCamelCase for methods/vars/fields.\n")
+                .append("- If META.className looks obfuscated (length ≤ 2 or matches [a-z]\\d+), strongly propose a better class name.\n")
+                .append("- Derive semantics from types, call patterns, and string literals; keep package unchanged.\n\n")
+                .append("Output ONLY the JSON array, no extra text.\n\n");
+
         int idx = 1;
-        for (String s : batch) {
-            sb.append("// SNIPPET #").append(idx++).append("\n")
-                    .append("```java\n").append(s).append("\n```\n\n");
+        for (String block : batch) {
+            sb.append("// SNIPPET #").append(idx++).append('\n');
+            // 这里不要再套一层 ```，直接把带 META 的块贴上去
+            sb.append(block).append("\n\n");
         }
-        sb.append("Output ONLY the JSON array, no extra text.");
         return sb.toString();
     }
 

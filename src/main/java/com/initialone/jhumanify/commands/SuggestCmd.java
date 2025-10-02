@@ -118,7 +118,7 @@ public class SuggestCmd implements Runnable {
             if ("openai".equalsIgnoreCase(provider)) {
                 mapping = suggestWithOpenAI(snippets, model, batch);
             } else if ("deepseek".equalsIgnoreCase(provider)) {
-                mapping = suggestWithDeepSeekViaClient(snippets, model, dsBase, dsKey, batch);
+                mapping = suggestWithDeepSeek(snippets, model, dsBase, dsKey, batch);
             } else if ("local".equalsIgnoreCase(provider)) {
                 mapping = suggestWithLocal(snippets, localApi, endpoint, model, batch);
             } else {
@@ -173,189 +173,115 @@ public class SuggestCmd implements Runnable {
     private Mapping suggestWithOpenAI(List<Snippet> snippets, String model, int batchSize) throws Exception {
         String apiKey = System.getenv("OPENAI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("[suggest] OPENAI_API_KEY missing. Fallback to dummy.");
+            System.err.println("[suggest/openai] OPENAI_API_KEY missing. Fallback to dummy.");
             return suggestHeuristically(snippets);
         }
-        LlmClient client = new OpenAiClient(apiKey, model, batchSize);
-        List<String> blocks = snippets.stream().map(this::formatSnippetBlock).toList();
+
+        // 1) 准备带 META 的片段
+        List<String> blocks = snippets.stream()
+                .map(this::formatSnippetBlock) // 已包含 META 头 + 代码块
+                .toList();
+
+        // 2) 走统一的 LLM 客户端（支持分批）
+        com.initialone.jhumanify.llm.LlmClient client =
+                new com.initialone.jhumanify.llm.OpenAiClient(apiKey, model, batchSize);
+
         List<RenameSuggestion> items = client.suggestRenames(blocks);
-        Mapping m0 = suggestionsToMapping(items, snippets);
-        return m0;
+
+        // 3) 结构化 -> Mapping
+        Mapping raw = suggestionsToMapping(items, snippets);
+
+        // 4) 键上锁 + 清洗兜底（非常关键，过滤掉模型可能多产出的无关键）
+        Allowed allow = buildAllowed(snippets);
+        Mapping cleaned = sanitizeAndFill(raw, allow, snippets);
+
+        return cleaned;
     }
 
     /* ================== DeepSeek provider ================== */
-    private Mapping suggestWithDeepSeekViaClient(List<Snippet> snippets,
-                                                 String model,
-                                                 String baseUrl,
-                                                 String keyOpt,
-                                                 int batchSize) throws Exception {
-        String apiKey = (keyOpt != null && !keyOpt.isBlank()) ? keyOpt : System.getenv("DEEPSEEK_API_KEY");
+    private Mapping suggestWithDeepSeek(List<Snippet> snippets,
+                                        String model,
+                                        String baseUrl,
+                                        String keyOpt,
+                                        int batchSize) throws Exception {
+        String apiKey = (keyOpt != null && !keyOpt.isBlank())
+                ? keyOpt
+                : System.getenv("DEEPSEEK_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("[suggest/deepseek] DEEPSEEK_API_KEY missing. Fallback to dummy.");
             return suggestHeuristically(snippets);
         }
-        LlmClient client = new DeepSeekClient(apiKey, model, baseUrl, batchSize, 180);
+
+        // 注意：DeepSeekClient 在 com.initialone.jhumanify.llm 包
+        com.initialone.jhumanify.llm.LlmClient client =
+                new com.initialone.jhumanify.llm.DeepSeekClient(apiKey, model, baseUrl, batchSize, 180);
+
+        // 和 OpenAI 分支一致：准备 blocks -> 调 client -> 列表转 Mapping
         List<String> blocks = snippets.stream().map(this::formatSnippetBlock).toList();
-        var items = client.suggestRenames(blocks);
-        return suggestionsToMapping(items, snippets);
+        List<com.initialone.jhumanify.model.RenameSuggestion> items = client.suggestRenames(blocks);
+
+        // 如果你沿用原来的 RenameSuggestion（com.example 包），把 import/包名对齐即可。
+        // 下面这行是你已有的方法：用 {class,method,field,var} 建议回填到精确键
+        Mapping m0 = suggestionsToMapping(
+                // 若包名不同，做一次转换或直接统一到你当前工程用的 RenameSuggestion 类
+                items.stream().map(r -> {
+                    RenameSuggestion x = new RenameSuggestion();
+                    x.kind = r.kind; x.oldName = r.oldName; x.newName = r.newName;
+                    return x;
+                }).toList(),
+                snippets
+        );
+        return m0;
     }
 
-    /* ================== Local provider (ollama / openai-compat) ================== */
+    /* ================== Local provider (openai-compat / ollama) ================== */
     private Mapping suggestWithLocal(List<Snippet> snippets,
                                      String localApi,
                                      String endpoint,
                                      String model,
                                      int batchSize) throws Exception {
-        OkHttpClient http = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(Math.max(10, Math.min(60, timeoutSec / 3))))
-                .readTimeout(Duration.ofSeconds(timeoutSec))
-                .writeTimeout(Duration.ofSeconds(timeoutSec))
-                .callTimeout(Duration.ofSeconds(timeoutSec + 30))
-                .build();
+        // 新的 LocalClient：支持 openai-compat / ollama
+        com.initialone.jhumanify.llm.LlmClient client =
+                new com.initialone.jhumanify.llm.LocalClient(localApi, endpoint, model, batchSize, timeoutSec);
 
-        Mapping merged = new Mapping();
-        List<List<Snippet>> batches = chunk(snippets, batchSize);
-        int idx = 1;
-        for (List<Snippet> group : batches) {
-            Allowed allow = buildAllowed(group);
-            String prompt = buildPrompt(group, allow);
+        // 和 OpenAI/DeepSeek 分支相同：准备 blocks → 要求重命名 → 列表转 Mapping
+        List<String> blocks = snippets.stream().map(this::formatSnippetBlock).toList();
+        List<com.initialone.jhumanify.model.RenameSuggestion> items = client.suggestRenames(blocks);
 
-            String content;
-            if ("openai".equalsIgnoreCase(localApi)) {
-                String url = joinUrl(endpoint, "/chat/completions");
-                String payload = """
-                {"model":%s,"messages":[
-                  {"role":"system","content":"You are an expert Java deobfuscation assistant. Return ONLY JSON."},
-                  {"role":"user","content": %s}
-                ],"temperature":0.2}
-                """.formatted(jsonQuote(model), jsonQuote(prompt));
-                Request req = new Request.Builder()
-                        .url(url).header("Content-Type","application/json")
-                        .post(RequestBody.create(payload, MediaType.parse("application/json"))).build();
-                try (Response resp = http.newCall(req).execute()) {
-                    if (!resp.isSuccessful()) {
-                        System.err.println("[suggest/local-openai] HTTP " + resp.code() + " " + resp.message() + ", batch " + idx);
-                        continue;
-                    }
-                    content = extractContent(Objects.requireNonNull(resp.body()).string());
-                }
-            } else if ("ollama".equalsIgnoreCase(localApi)) {
-                String url = joinUrl(endpoint, "/api/chat");
-                String payload = """
-                {"model":%s,"messages":[
-                  {"role":"system","content":"You are an expert Java deobfuscation assistant. Return ONLY JSON."},
-                  {"role":"user","content": %s}
-                ],"options":{"temperature":0.2},"stream":false}
-                """.formatted(jsonQuote(model), jsonQuote(prompt));
-                Request req = new Request.Builder()
-                        .url(url).header("Content-Type","application/json")
-                        .post(RequestBody.create(payload, MediaType.parse("application/json"))).build();
-                try (Response resp = http.newCall(req).execute()) {
-                    if (!resp.isSuccessful()) {
-                        System.err.println("[suggest/local-ollama] HTTP " + resp.code() + " " + resp.message() + ", batch " + idx);
-                        continue;
-                    }
-                    content = extractOllamaContent(Objects.requireNonNull(resp.body()).string());
-                }
-            } else {
-                throw new IllegalArgumentException("Unsupported --local-api: " + localApi);
-            }
+        // 如果你的 RenameSuggestion 仍在 com.example 包，做一次简单转换即可：
+        List<RenameSuggestion> items2 = items.stream().map(r -> {
+            RenameSuggestion z = new RenameSuggestion();
+            z.kind = r.kind; z.oldName = r.oldName; z.newName = r.newName;
+            return z;
+        }).toList();
 
-            Mapping part = tryParseMapping(content);
-            // 先对单批做一次清洗（只保留 batch 内允许的键），避免错键污染
-            Mapping cleaned = sanitizeAndFill(part, allow, group);
-            mergeInto(merged, cleaned);
-            System.out.println("[suggest] local batch " + idx + "/" + batches.size() + " merged.");
-            idx++;
-        }
-        return merged;
-    }
-
-    /* ================== Prompt / 解析 / 合并 ================== */
-    private String buildPrompt(List<Snippet> group, Allowed allow) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("You are a senior Java reverse-engineering assistant.\n")
-                .append("Return STRICT JSON object with keys: simple (map), classFqn (map), fieldFqn (map), methodSig (map).\n")
-                .append("Use ONLY the keys listed below. Do NOT invent keys. Values must be valid Java identifiers.\n")
-                .append("Definitions:\n")
-                .append("- classFqn: \"oldFqn -> newFqn\" e.g. \"a.b.C\":\"a.b.UserService\" (keep package unless needed)\n")
-                .append("- fieldFqn: \"a.b.C#field\" -> \"newName\"\n")
-                .append("- methodSig: \"a.b.C.m(T1,T2)\" -> \"newName\" (types as in code)\n")
-                .append("- simple: short identifier renames for locals/params/private members\n\n");
-
-        sb.append("ALLOWED classFqn keys:\n");
-        for (String k : allow.classKeys) sb.append("- ").append(k).append("\n");
-        sb.append("\nALLOWED methodSig keys:\n");
-        for (String k : allow.methodKeys) sb.append("- ").append(k).append("\n");
-        sb.append("\nALLOWED simple keys (locals/params):\n");
-        if (allow.simpleKeys.isEmpty()) {
-            sb.append("- a\n- b\n- c\n- x\n- i\n");
-        } else {
-            for (String k : allow.simpleKeys) sb.append("- ").append(k).append("\n");
-        }
-
-        sb.append("\nSNIPPETS:\n");
-        for (Snippet s : group) {
-            sb.append("// ").append(s.qualifiedSignature).append("\n");
-            if (s.strings != null && !s.strings.isEmpty()) {
-                sb.append("// strings: ").append(String.join(" | ", s.strings.stream().limit(6).toList())).append("\n");
-            }
-            sb.append("```java\n").append(s.code == null ? "" : s.code).append("\n```\n\n");
-        }
-        sb.append("Output ONLY the JSON object.\n");
-        return sb.toString();
-    }
-
-    private static List<List<Snippet>> chunk(List<Snippet> list, int size) {
-        List<List<Snippet>> out = new ArrayList<>();
-        int step = Math.max(1, size);
-        for (int i=0; i<list.size(); i+=step) out.add(list.subList(i, Math.min(i+step, list.size())));
-        return out;
-    }
-
-    private static String extractContent(String body) {
-        int i = body.lastIndexOf("\"content\":\"");
-        if (i<0) return body;
-        StringBuilder sb = new StringBuilder();
-        boolean esc = false;
-        for (int idx = i + 11; idx < body.length(); idx++) {
-            char c = body.charAt(idx);
-            if (esc) { sb.append(c == 'n' ? '\n' : (c == 't' ? '\t' : c)); esc = false; continue; }
-            if (c == '\\') { esc = true; continue; }
-            if (c == '"') { break; }
-            sb.append(c);
-        }
-        return sb.toString();
-    }
-
-    private Mapping tryParseMapping(String content) {
-        int st = content.indexOf('{');
-        int ed = content.lastIndexOf('}');
-        String json = (st>=0 && ed>st) ? content.substring(st, ed+1) : content;
-        ObjectMapper om = new ObjectMapper();
-        try {
-            return om.readValue(json.getBytes(StandardCharsets.UTF_8), Mapping.class);
-        } catch (Exception e) {
-            System.err.println("[suggest] parse fail -> return empty: " + e.getMessage());
-            return new Mapping();
-        }
-    }
-
-    private void mergeInto(Mapping base, Mapping add) {
-        if (add == null) return;
-        base.simple.putAll(add.simple);
-        base.classFqn.putAll(add.classFqn);
-        base.fieldFqn.putAll(add.fieldFqn);
-        base.methodSig.putAll(add.methodSig);
+        Mapping m0 = suggestionsToMapping(items2, snippets);
+        return m0;
     }
 
     private String formatSnippetBlock(Snippet s) {
         StringBuilder sb = new StringBuilder();
-        sb.append("// ").append(s.qualifiedSignature).append("\n");
-        if (s.strings != null && !s.strings.isEmpty()) {
-            sb.append("// strings: ").append(String.join(" | ", s.strings.stream().limit(6).toList())).append("\n");
+
+        // === 清晰的结构化头（LLM 主要依据这里提取 old 名称）===
+        sb.append("// META\n");
+        sb.append("packageName: ").append(nvl(s.pkg)).append("\n");
+        sb.append("className: ").append(nvl(s.className)).append("\n");
+        sb.append("classFqn: ").append(nvl(s.classFqn)).append("\n");
+        sb.append("methodName: ").append(nvl(s.methodName)).append("\n");
+        sb.append("methodSignature: ").append(nvl(s.qualifiedSignature)).append("\n");
+        if (s.paramTypes != null && !s.paramTypes.isEmpty()) {
+            sb.append("paramTypes: ").append(String.join(",", s.paramTypes)).append("\n");
         }
-        sb.append("```java\n").append(s.code == null ? "" : s.code).append("\n```");
+        if (s.strings != null && !s.strings.isEmpty()) {
+            sb.append("strings: ").append(String.join(" | ", s.strings.stream().limit(8).toList())).append("\n");
+        }
+        sb.append("\n");
+
+        // === 代码体 ===
+        sb.append("```java\n")
+                .append(s.code == null ? "" : s.code)
+                .append("\n```\n");
+
         return sb.toString();
     }
 
@@ -431,84 +357,6 @@ public class SuggestCmd implements Runnable {
         return out;
     }
 
-    /* ========================= 预设后处理：kv ========================= */
-    private Mapping postProcessPreset(Mapping in, List<Snippet> all, String preset) {
-        final Mapping out = (in != null) ? in : new Mapping();
-        if (!"kv".equalsIgnoreCase(preset)) return out;
-
-        Map<String, List<Snippet>> byFqn = all.stream()
-                .filter(s -> s.classFqn != null)
-                .collect(Collectors.groupingBy(s -> s.classFqn));
-
-        // 1) main(String[]) -> Cli
-        byFqn.forEach((fqn, list) -> {
-            boolean hasMain = list.stream().anyMatch(s ->
-                    "main".equals(s.methodName) &&
-                            (
-                                    (s.paramTypes != null && s.paramTypes.size() == 1 &&
-                                            (s.paramTypes.get(0).contains("String[]") || (s.decl != null && s.decl.contains("String[]"))))
-                                            || (s.decl != null && s.decl.contains("main(") && s.decl.contains("String[]"))
-                            )
-            );
-            if (hasMain) putClassRenameIfAbsent(out.classFqn, fqn, simpleToPkg(fqn, "Cli"));
-        });
-
-        // 2) KeyValueStore（P/G/K 或有过期判断/CHM痕迹）
-        byFqn.forEach((fqn, list) -> {
-            boolean hasPGK = list.stream().anyMatch(s -> "P".equals(s.methodName) || "G".equals(s.methodName) || "K".equals(s.methodName));
-            boolean hasKVTrace = list.stream().anyMatch(s -> {
-                String c = nvl(s.code);
-                return c.contains("expirationTime")
-                        || c.contains("System.currentTimeMillis()")
-                        || c.contains("ConcurrentHashMap<")
-                        || (c.contains(".put(") && c.contains(".get("));
-            });
-            if (hasPGK || hasKVTrace) {
-                putClassRenameIfAbsent(out.classFqn, fqn, simpleToPkg(fqn, "KeyValueStore"));
-                list.forEach(s -> {
-                    if (s.qualifiedSignature == null) return;
-                    switch (s.methodName) {
-                        case "P" -> out.methodSig.putIfAbsent(s.qualifiedSignature, "put");
-                        case "G" -> out.methodSig.putIfAbsent(s.qualifiedSignature, "get");
-                        case "K" -> out.methodSig.putIfAbsent(s.qualifiedSignature, "listKeys");
-                        default -> {}
-                    }
-                });
-            }
-        });
-
-        // 3) e/d(String) -> encodeKey / decodeKey
-        byFqn.forEach((fqn, list) -> list.forEach(s -> {
-            if (s.qualifiedSignature == null || s.methodName == null) return;
-            List<String> pt = (s.paramTypes == null) ? List.of() : s.paramTypes;
-            boolean oneStr = pt.size() == 1 && pt.get(0).contains("String");
-            boolean declStr = (s.decl != null && s.decl.startsWith("String "));
-            boolean staticLike = (s.decl != null && s.decl.contains("static "));
-            if (oneStr && declStr && staticLike) {
-                if ("e".equals(s.methodName)) {
-                    out.methodSig.putIfAbsent(s.qualifiedSignature, "encodeKey");
-                } else if ("d".equals(s.methodName)) {
-                    out.methodSig.putIfAbsent(s.qualifiedSignature, "decodeKey");
-                }
-            }
-        }));
-
-        // 4) v0 -> Entry（根据 .value/.expirationTime 的使用痕迹推断包名）
-        Set<String> pkgs = all.stream()
-                .filter(s -> {
-                    String c = nvl(s.code);
-                    return c.matches("(?s).*\\bv0\\b.*") && (c.contains(".value") || c.contains(".expirationTime"));
-                })
-                .map(s -> nvl(s.pkg))
-                .filter(p -> !p.isBlank())
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-        for (String pkg : pkgs) {
-            out.classFqn.putIfAbsent(pkg + ".v0", pkg + ".Entry");
-        }
-
-        return out;
-    }
-
     private static String nvl(String s) { return s == null ? "" : s; }
     private static void putClassRenameIfAbsent(Map<String,String> map, String oldFqn, String newFqn) {
         if (oldFqn == null || newFqn == null || oldFqn.equals(newFqn)) return;
@@ -518,29 +366,5 @@ public class SuggestCmd implements Runnable {
         if (fqn == null || fqn.isBlank()) return newSimple;
         int i = fqn.lastIndexOf('.');
         return i < 0 ? newSimple : fqn.substring(0, i) + "." + newSimple;
-    }
-
-    /* ============ Local HTTP helpers ============ */
-    private static String joinUrl(String base, String path) {
-        if (base.endsWith("/")) base = base.substring(0, base.length()-1);
-        return base + path;
-    }
-    private static String jsonQuote(String s) {
-        String esc = s.replace("\\","\\\\").replace("\"","\\\"").replace("\n","\\n");
-        return "\"" + esc + "\"";
-    }
-    /** 提取 Ollama chat 的 content（优先 message.content；备选 response） */
-    private static String extractOllamaContent(String body) {
-        try {
-            var om = new ObjectMapper();
-            var root = om.readTree(body);
-            var msg = root.path("message").path("content").asText(null);
-            if (msg != null) return msg;
-            var resp = root.path("response").asText(null);
-            if (resp != null) return resp;
-            return body;
-        } catch (Exception e) {
-            return body;
-        }
     }
 }

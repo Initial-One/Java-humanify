@@ -9,41 +9,27 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * DeepSeek Chat Completions 客户端（OpenAI 兼容）。
- * 约定：返回 JSON 形如：
- * {"renames":[{"kind":"class","old":"Foo","new":"Adder"}, {"kind":"method","old":"b","new":"add"}, {"kind":"field","old":"a","new":"base"}, {"kind":"var","old":"x","new":"value"}]}
- * 也兼容：直接返回数组 [{...},{...}]。
- */
-public class DeepSeekClient implements LlmClient {
+/** 本地 LLM 客户端：支持 openai 兼容 / ollama。 */
+public class LocalClient implements LlmClient {
 
     private final OkHttpClient http;
     private final ObjectMapper om = new ObjectMapper();
 
-    private final String apiKey;
+    private final String apiType;     // "openai" | "ollama"
+    private final String endpoint;    // e.g. http://localhost:1234/v1  或 http://localhost:11434
     private final String model;
-    private final String baseUrl;     // e.g. https://api.deepseek.com 或 https://api.deepseek.com/v1
     private final int batchSize;
 
-    public DeepSeekClient(String apiKey, String model, int batchSize) {
-        this(apiKey, model, "https://api.deepseek.com", batchSize, 180);
-    }
-
-    public DeepSeekClient(String apiKey, String model, String baseUrl, int batchSize, int timeoutSec) {
-        this.apiKey = apiKey;
+    public LocalClient(String apiType, String endpoint, String model, int batchSize, int timeoutSec) {
+        this.apiType = (apiType == null || apiType.isBlank()) ? "ollama" : apiType.toLowerCase();
+        this.endpoint = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
         this.model = model;
-        // 统一补上 /v1
-        String b = (baseUrl == null || baseUrl.isBlank()) ? "https://api.deepseek.com" : baseUrl;
-        b = b.endsWith("/") ? b.substring(0, b.length() - 1) : b;
-        if (!b.endsWith("/v1")) b = b + "/v1";
-        this.baseUrl = b;
-
         this.batchSize = Math.max(1, batchSize);
         this.http = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(20))
-                .readTimeout(Duration.ofSeconds(timeoutSec))
-                .writeTimeout(Duration.ofSeconds(timeoutSec))
-                .callTimeout(Duration.ofSeconds(timeoutSec + 30))
+                .connectTimeout(Duration.ofSeconds(Math.max(10, Math.min(60, Math.max(1, timeoutSec / 3)))))
+                .readTimeout(Duration.ofSeconds(Math.max(10, timeoutSec)))
+                .writeTimeout(Duration.ofSeconds(Math.max(10, timeoutSec)))
+                .callTimeout(Duration.ofSeconds(Math.max(30, timeoutSec + 30)))
                 .build();
     }
 
@@ -55,10 +41,13 @@ public class DeepSeekClient implements LlmClient {
             List<String> group = snippetBlocks.subList(i, to);
             String prompt = buildPrompt(group);
 
-            String body = callDeepSeek(prompt);
-            String content = extractMessageContent(body);
+            String body = switch (apiType) {
+                case "openai" -> callOpenAiCompat(prompt);
+                case "ollama" -> callOllama(prompt);
+                default -> throw new IllegalArgumentException("Unsupported local api: " + apiType);
+            };
 
-            // 兼容两种顶层：{"renames":[...]} 或 直接 [...]
+            String content = extractMessageContent(body);
             JsonNode root = tryParseJson(content);
             if (root == null) continue;
 
@@ -66,17 +55,15 @@ public class DeepSeekClient implements LlmClient {
                 appendRenames(out, root.get("renames"));
             } else if (root.isArray()) {
                 appendRenames(out, root);
-            } else {
-                // 万一是 {"simple":{...}, "classFqn":{...}...} 这种，也可忽略；上层有兜底
             }
         }
         return out;
     }
 
-    /* ------------------------ HTTP ------------------------ */
+    /* ---------- HTTP ---------- */
 
-    private String callDeepSeek(String prompt) throws Exception {
-        String url = baseUrl + "/chat/completions";
+    private String callOpenAiCompat(String prompt) throws Exception {
+        String url = endpoint + "/chat/completions";
         String payload = """
         {
           "model": %s,
@@ -84,24 +71,42 @@ public class DeepSeekClient implements LlmClient {
             {"role":"system","content":"You are an expert Java deobfuscation assistant. Return ONLY JSON as specified."},
             {"role":"user","content": %s}
           ],
-          "temperature": 0.2,
-          "stream": false
+          "temperature": 0.2
         }
         """.formatted(jsonQuote(model), jsonQuote(prompt));
-
         Request req = new Request.Builder()
                 .url(url)
-                .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .post(RequestBody.create(payload, MediaType.parse("application/json")))
                 .build();
-
         try (Response resp = http.newCall(req).execute()) {
-            if (!resp.isSuccessful()) {
-                throw new IllegalStateException("DeepSeek HTTP " + resp.code() + " " + resp.message());
-            }
-            ResponseBody rb = resp.body();
-            if (rb == null) throw new IllegalStateException("Empty body");
+            if (!resp.isSuccessful()) throw new IllegalStateException("local(openai) HTTP " + resp.code() + " " + resp.message());
+            ResponseBody rb = resp.body(); if (rb == null) throw new IllegalStateException("Empty body");
+            return rb.string();
+        }
+    }
+
+    private String callOllama(String prompt) throws Exception {
+        String url = endpoint + "/api/chat";
+        String payload = """
+        {
+          "model": %s,
+          "messages": [
+            {"role":"system","content":"You are an expert Java deobfuscation assistant. Return ONLY JSON as specified."},
+            {"role":"user","content": %s}
+          ],
+          "options": {"temperature": 0.2},
+          "stream": false
+        }
+        """.formatted(jsonQuote(model), jsonQuote(prompt));
+        Request req = new Request.Builder()
+                .url(url)
+                .header("Content-Type", "application/json")
+                .post(RequestBody.create(payload, MediaType.parse("application/json")))
+                .build();
+        try (Response resp = http.newCall(req).execute()) {
+            if (!resp.isSuccessful()) throw new IllegalStateException("local(ollama) HTTP " + resp.code() + " " + resp.message());
+            ResponseBody rb = resp.body(); if (rb == null) throw new IllegalStateException("Empty body");
             return rb.string();
         }
     }
@@ -111,7 +116,7 @@ public class DeepSeekClient implements LlmClient {
         return "\"" + esc + "\"";
     }
 
-    /* ------------------------ Prompt ------------------------ */
+    /* ---------- Prompt ---------- */
 
     private String buildPrompt(List<String> group) {
         StringBuilder sb = new StringBuilder();
@@ -132,20 +137,24 @@ public class DeepSeekClient implements LlmClient {
                         "{\"kind\":\"var\",\"old\":\"x\",\"new\":\"value\"}]}\n\n"
         );
         sb.append("SNIPPETS:\n");
-        for (String s : group) {
-            sb.append(s).append("\n\n");
-        }
+        for (String s : group) sb.append(s).append("\n\n");
         return sb.toString();
     }
 
-    /* ------------------------ Parse ------------------------ */
+    /* ---------- Parse ---------- */
 
     private String extractMessageContent(String body) {
         try {
             JsonNode root = om.readTree(body);
-            JsonNode node = root.path("choices").path(0).path("message").path("content");
-            if (node.isMissingNode() || node.isNull()) return body;
-            return node.asText();
+            // openai-compat
+            JsonNode x = root.path("choices").path(0).path("message").path("content");
+            if (!x.isMissingNode() && !x.isNull()) return x.asText();
+            // ollama
+            x = root.path("message").path("content");
+            if (!x.isMissingNode() && !x.isNull()) return x.asText();
+            x = root.path("response");
+            if (!x.isMissingNode() && !x.isNull()) return x.asText();
+            return body;
         } catch (Exception e) {
             // 退化：body 里直接找 "content":"..."
             int i = body.lastIndexOf("\"content\":\"");
@@ -171,16 +180,14 @@ public class DeepSeekClient implements LlmClient {
             int fence2 = cleaned.indexOf("```", fence + 3);
             if (fence2 > fence) cleaned = cleaned.substring(fence + 3, fence2);
         }
-        // 截取最外层 {} 或 []
         cleaned = cleaned.trim();
         int stObj = cleaned.indexOf('{');
         int stArr = cleaned.indexOf('[');
         try {
             if (stArr >= 0 && (stObj < 0 || stArr < stObj)) {
-                // 以数组开头
-                return om.readTree(cleaned.substring(stArr));
+                return om.readTree(cleaned.substring(stArr)); // 顶层数组
             } else if (stObj >= 0) {
-                return om.readTree(cleaned.substring(stObj));
+                return om.readTree(cleaned.substring(stObj)); // 顶层对象
             } else {
                 return null;
             }
@@ -199,9 +206,7 @@ public class DeepSeekClient implements LlmClient {
             if (kind == null || oldN == null || newN == null) continue;
 
             RenameSuggestion r = new RenameSuggestion();
-            r.kind = kind;     // "class" | "method" | "field" | "var"
-            r.oldName = oldN;
-            r.newName = newN;
+            r.kind = kind; r.oldName = oldN; r.newName = newN;
             out.add(r);
         }
     }
