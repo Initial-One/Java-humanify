@@ -25,7 +25,7 @@ public class AnalyzeCmd implements Runnable {
     @CommandLine.Parameters(index = "1", description = "Output snippets.json path")
     String outJson;
 
-    @CommandLine.Option(names = "--maxBodyLen", defaultValue = "1600",
+    @CommandLine.Option(names = "--maxBodyLen", defaultValue = "6400",
             description = "Max characters of body captured per snippet")
     int maxBodyLen;
 

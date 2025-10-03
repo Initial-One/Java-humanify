@@ -31,11 +31,11 @@ public class HumanifyCmd implements Runnable {
 
     /* 建议阶段参数（与 SuggestCmd 保持一致） */
     @CommandLine.Option(names = "--provider", defaultValue = "dummy",
-            description = "dummy|openai|local")
+            description = "dummy|openai|local|deepseek")
     String provider;
 
     @CommandLine.Option(names = "--model", defaultValue = "gpt-4o-mini",
-            description = "Model name (OpenAI 或本地兼容/ollama 的模型名)")
+            description = "Model name (OpenAI/ollama)")
     String model;
 
     @CommandLine.Option(names = "--batch", defaultValue = "12",
@@ -71,6 +71,25 @@ public class HumanifyCmd implements Runnable {
             description = "Format the output Java files after apply. Default: ${DEFAULT-VALUE}")
     boolean format;
 
+    @CommandLine.Option(
+            names = {"--lang"},
+            defaultValue = "en",
+            description = "Javadoc language: zh|en (default: ${DEFAULT-VALUE})")
+    String lang;
+
+    @CommandLine.Option(
+            names = {"--style"},
+            defaultValue = "concise",
+            description = "Javadoc style: concise|detailed (default: ${DEFAULT-VALUE})")
+    String style;
+
+    @CommandLine.Option(
+            names = {"--overwrite"},
+            defaultValue = "false",
+            negatable = true,
+            description = "Overwrite existing Javadoc (default: ${DEFAULT-VALUE})")
+    boolean overwriteDocs;
+
     @Override
     public void run() {
         Path src = Paths.get(srcDir);
@@ -92,7 +111,7 @@ public class HumanifyCmd implements Runnable {
             long t0 = System.currentTimeMillis();
 
             /* ========== 1/3 analyze ========== */
-            System.out.println("[humanify] 1/3 analyze...");
+            System.out.println("[humanify] 1/4 analyze...");
             List<String> analyzeArgs = List.of(src.toString(), snippets.toString());
             int rc1 = new CommandLine(new AnalyzeCmd()).execute(analyzeArgs.toArray(new String[0]));
             if (rc1 != 0) throw new IllegalStateException("analyze failed with code " + rc1);
@@ -100,7 +119,7 @@ public class HumanifyCmd implements Runnable {
                 throw new IllegalStateException("snippets.json was not produced: " + snippets);
 
             /* ========== 2/3 suggest ========== */
-            System.out.println("[humanify] 2/3 suggest (" + provider + ")...");
+            System.out.println("[humanify] 2/4 suggest (" + provider + ")...");
             List<String> suggestArgs = new ArrayList<>();
             // 选项（存在则加入）
             suggestArgs.addAll(List.of("--provider", provider));
@@ -125,7 +144,7 @@ public class HumanifyCmd implements Runnable {
                 throw new IllegalStateException("mapping.json was not produced: " + mapping);
 
             /* ========== 3/3 apply ========== */
-            System.out.println("[humanify] 3/3 apply...");
+            System.out.println("[humanify] 3/4 apply...");
             List<String> applyArgs = new ArrayList<>();
             if (classpath != null && !classpath.isEmpty() && hasField(ApplyCmd.class, "classpath")) {
                 applyArgs.add("--classpath");
@@ -137,6 +156,57 @@ public class HumanifyCmd implements Runnable {
 
             int rc3 = new CommandLine(new ApplyCmd()).execute(applyArgs.toArray(new String[0]));
             if (rc3 != 0) throw new IllegalStateException("apply failed with code " + rc3);
+
+            /* ========== 4/4 annotate ========== */
+            System.out.println("[humanify] 4/4 annotate...");
+
+            List<String> annArgs = new ArrayList<>();
+
+            annArgs.add("--src");
+            annArgs.add(out.toString());
+
+            annArgs.add("--lang");
+            annArgs.add(lang != null ? lang : "en");
+
+            annArgs.add("--style");
+            annArgs.add(style != null ? style : "detailed");
+
+            if (overwriteDocs) {
+                annArgs.add("--overwrite");
+            }
+
+            annArgs.add("--provider");
+            annArgs.add(provider != null ? provider : "dummy");
+
+            annArgs.add("--model");
+            annArgs.add(model != null ? model : "gpt-4o-mini");
+
+            annArgs.add("--batch");
+            annArgs.add(Integer.toString(batch));
+
+            if ("local".equalsIgnoreCase(provider)) {
+                annArgs.add("--local-api");
+                annArgs.add((localApi != null && !localApi.isEmpty()) ? localApi : "ollama");
+
+                if (endpoint != null && !endpoint.isEmpty()) {
+                    annArgs.add("--endpoint");
+                    annArgs.add(endpoint);
+                }
+
+                annArgs.add("--timeout-sec");
+                annArgs.add(Integer.toString(180)); // 或自定义
+            } else {
+                if (endpoint != null && !endpoint.isEmpty()) {
+                    annArgs.add("--endpoint");
+                    annArgs.add(endpoint);
+                }
+                annArgs.add("--timeout-sec");
+                annArgs.add(Integer.toString(180));
+            }
+
+            int rc4 = new CommandLine(new AnnotateCmd()).execute(annArgs.toArray(new String[0]));
+            if (rc4 != 0) throw new IllegalStateException("annotate failed with code " + rc4);
+            
 
             // 可选格式化
             if (format) {

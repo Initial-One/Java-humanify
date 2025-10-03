@@ -12,7 +12,8 @@ import picocli.CommandLine;
                 AnalyzeCmd.class,
                 SuggestCmd.class,
                 ApplyCmd.class,
-                HumanifyCmd.class
+                HumanifyCmd.class,
+                AnnotateCmd.class
         })
 public class Main implements Runnable {
     public void run() { System.out.println("Use a subcommand. Try --help."); }

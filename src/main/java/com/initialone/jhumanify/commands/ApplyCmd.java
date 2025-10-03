@@ -225,7 +225,6 @@ public class ApplyCmd implements Runnable {
                         } catch (Throwable ignore) {}
                     }));
 
-                    // 方法声明 / 调用点（四连匹配）
                     cu.findAll(MethodDeclaration.class).forEach(md -> {
                         try {
                             ResolvedMethodDeclaration r = md.resolve();
@@ -249,7 +248,6 @@ public class ApplyCmd implements Runnable {
                         }
                     });
 
-                    // 参数 / 局部（避免冲突）
                     cu.findAll(Parameter.class).forEach(pn -> {
                         String want = mapping.simple.get(pn.getNameAsString());
                         if (want != null && !want.equals(pn.getNameAsString())) {
@@ -269,7 +267,6 @@ public class ApplyCmd implements Runnable {
                     });
                 }
 
-                // 写出（根据 public 顶级类名决定文件名）
                 Path rel = in.relativize(p);
                 Path target = out.resolve(rel);
                 Optional<String> publicTop = cu.getTypes().stream()
@@ -358,7 +355,6 @@ public class ApplyCmd implements Runnable {
         return (old != null) ? (old + tail) : fieldFqn;
     }
 
-    /* 多轮查找方法名：原sig → 旧类回溯 → 归一化 → 归一化后旧类回溯 */
     private static String lookupMethodName(Mapping m, Map<String,String> newToOldClass, String sig) {
         String nn = m.methodSig.get(sig);
         if (nn != null) return nn;
@@ -372,7 +368,6 @@ public class ApplyCmd implements Runnable {
         return m.methodSig.get(nso);
     }
 
-    /* 作用域中是否已有同名（用于避免把声明名改成已存在的名字） */
     private static boolean existsInScope(Node scope, String name) {
         Set<String> names = new HashSet<>();
         scope.findAll(VariableDeclarator.class).forEach(v -> names.add(v.getNameAsString()));
@@ -390,7 +385,6 @@ public class ApplyCmd implements Runnable {
 
             String oldPkg = Tools.pkgName(oldFqn);
 
-            // 依据“同包或已导入”来判断这个 simple 更可能指向哪个 FQN
             boolean samePkg = Objects.equals(cuPkg, oldPkg);
             boolean imported = cu.getImports().stream().anyMatch(imp ->
                     !imp.isAsterisk()
@@ -406,11 +400,10 @@ public class ApplyCmd implements Runnable {
 
     private static String guessByScopeAndArity(Mapping m, MethodCallExpr mc, String pkg, CompilationUnit cu) {
         if (mc.getScope().isEmpty() || !mc.getScope().get().isNameExpr()) return null;
-        String scopeSimple = mc.getScope().get().asNameExpr().getNameAsString(); // 例如 KeyEncoderDecoder
+        String scopeSimple = mc.getScope().get().asNameExpr().getNameAsString();
         int argc = mc.getArguments().size();
         String name = mc.getNameAsString();
 
-        // 根据 classFqn 映射，找出这个 scopeSimple 对应的旧 FQN（y0）
         String oldFqn = null;
         for (var e : m.classFqn.entrySet()) {
             String oldFqnCand = e.getKey(), newFqn = e.getValue();
@@ -419,13 +412,11 @@ public class ApplyCmd implements Runnable {
             }
         }
         if (oldFqn == null && pkg != null) {
-            // 同包猜测（例如 package demo.mix; scopeSimple=KeyEncoderDecoder）
             String nf = pkg + "." + scopeSimple;
             for (var e : m.classFqn.entrySet()) if (e.getValue().equals(nf)) { oldFqn = e.getKey(); break; }
         }
         if (oldFqn == null) return null;
 
-        // 在 methodSig 里找：类匹配 + 方法名匹配 + 参数个数匹配（忽略具体类型）
         String prefix = oldFqn + "." + name + "(";
         for (var e : m.methodSig.entrySet()) {
             String k = e.getKey();

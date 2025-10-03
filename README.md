@@ -1,11 +1,14 @@
 # Java Humanify
-> Deobfuscate Java code using LLMs ("ChatGPT,Ollama,DeepSeek,etc")
+> Deobfuscate Java code using LLMs ("ChatGPT, Ollama, DeepSeek, etc.")
 
-Java Humanify uses large language models (OpenAI, DeepSeek, Ollama, etc.) to suggest better names (classes, methods, fields, locals), while all actual code changes happen on the AST via JavaParser + Symbol Solver so the output remains 1-to-1 equivalent to the input.
+Java Humanify uses large language models (OpenAI, DeepSeek, Ollama, etc.) to **suggest better names** (classes, methods, fields, locals).  
+All actual code changes happen on the **AST** (JavaParser + Symbol Solver), so the output stays **semantically 1:1** with the input.
+
+Now it also supports **auto-Javadoc generation** for classes/constructors/methods via `annotate` (LLM or offline heuristics).
 
 Inspired by **HumanifyJS** — but for Java bytecode turned into decompiled sources.
 
-⸻
+---
 
 ## Why this exists
 
@@ -15,54 +18,68 @@ Decompiled / minified / obfuscated Java is painful to read:
 package demo.mix;public final class a{private static final int[] O={0,1,1,2};private a(){}public static int h(String s){long x=0x811c9dc5L;if(s==null)return 0;int i=0,n=s.length(),j=O[2];while(i<n){char c=s.charAt(i++);x^=c;x*=0x01000193L;x&=0xffffffffL;j^=(c<<1);j^=j>>>7;if((i&3)==0)x^=(j&0xff);}return (int)x;}}
 ```
 
-Java Humanify renames the identifiers coherently:
+Java Humanify renames identifiers **and (optionally) adds Javadoc**:
 
 ```java
 package demo.mix;
 
+/**
+ * Computes a 32-bit hash for the input string using FNV-1a with additional state mixing.
+ */
 public final class HashCalculator {
 
     private static final int[] O = { 0, 1, 1, 2 };
 
-    private HashCalculator() {
-    }
+    /**
+     * Private constructor to prevent instantiation of this utility class.
+     */
+    private HashCalculator() {}
 
+    /**
+     * Calculates a 32-bit hash value for the input string using FNV-1a with additional state mixing.
+     *
+     * @param inputString parameter
+     * @return return value
+     */
     public static int calculateHash(String inputString) {
         long storedValue = 0x811c9dc5L;
-        if (inputString == null)
-            return 0;
-        int i = 0, n = inputString.length(), state = O[2];
-        while (i < n) {
-            char character = inputString.charAt(i++);
-            storedValue ^= character;
+        if (inputString == null) return 0;
+        int index = 0, stringLength = inputString.length(), hashState = O[2];
+        while (index < stringLength) {
+            char currentChar = inputString.charAt(index++);
+            storedValue ^= currentChar;
             storedValue *= 0x01000193L;
             storedValue &= 0xffffffffL;
-            state ^= (character << 1);
-            state ^= state >>> 7;
-            if ((i & 3) == 0)
-                storedValue ^= (state & 0xff);
+            hashState ^= (currentChar << 1);
+            hashState ^= hashState >>> 7;
+            if ((index & 3) == 0) storedValue ^= (hashState & 0xff);
         }
         return (int) storedValue;
     }
 }
 ```
 
-LLMs do not touch your code structure.  
-They only propose names. The renaming is applied by JavaParser on the AST, with symbol resolution, constructor renames, imports, and file names kept in sync.
+LLMs do **not** touch your code structure.  
+They only propose names / comments. Renaming is applied on the AST with symbol resolution; constructors/imports/file names kept in sync.
 
-⸻
+---
 
 ## Highlights
 
-- **Pluggable LLMs**: OpenAI / DeepSeek / Local (Ollama, OpenAI-compatible)  
-- **Signature-accurate renames** (classFqn, methodSig, fieldFqn, with fallback)  
-- Works well on small-to-medium projects; robust AST transforms keep code compiling  
+- **Pluggable LLMs** for rename & docs: OpenAI / DeepSeek / Local (Ollama, OpenAI-compatible)
+- **Auto-Javadoc** via `annotate`:
+  - Targets classes/enums/records/constructors/methods
+  - Short, safe summaries (no wild guesses)
+  - Auto `@param/@return/@throws` based on signatures
+  - **Offline heuristics** available (no API key needed)
+- **Signature-accurate renames** (classFqn / methodSig / fieldFqn with fallbacks)
+- Robust AST transforms keep code compiling
 
-⸻
+---
 
 ## Quick start
 
-Run the all-in-one pipeline (analyze → suggest → apply) with one command:
+### One-shot pipeline (analyze → suggest → apply → annotate)
 
 ```bash
 # OpenAI example
@@ -93,11 +110,15 @@ java -jar target/java-humanify-*.jar humanify \
 samples/src samples/out
 ```
 
-⸻
+> `humanify` will:
+> 1) analyze → 2) suggest → 3) apply → 4) annotate  
+> Use `--lang/--style/--overwrite` to control the annotate step.
+
+---
 
 ## CLI commands
 
-You can also run the steps individually:
+You can also run steps individually.
 
 ### 1) Analyze
 ```bash
@@ -107,8 +128,7 @@ java -jar java-humanify.jar analyze \
 [--includeStrings true] \
 [--exclude "glob/**"]
 ```
-
-Generates `snippets.json` with per-method code & metadata (package, FQN, signature, strings).
+Outputs `snippets.json` with per-method code & metadata (package, FQN, signature, strings).
 
 ---
 
@@ -122,11 +142,7 @@ java -jar java-humanify.jar suggest \
 [--local-api ollama|openai] \
 [--timeout-sec 180] 
 ```
-
-Auth options:  
-- OpenAI: `OPENAI_API_KEY` or `--apiKey`  
-- DeepSeek: `DEEPSEEK_API_KEY` or `--ds-key`  
-- Local: `--endpoint + --model` (Ollama or OpenAI-compatible)  
+Auth options: **OpenAI** `OPENAI_API_KEY`, **DeepSeek** `DEEPSEEK_API_KEY`, **Local**: `--endpoint + --model`.
 
 ---
 
@@ -136,82 +152,79 @@ java -jar java-humanify.jar apply \
 <srcDir> <mapping.json> <outDir> \
 [--classpath jarOrDir[:morePaths]]
 ```
-
-Updates class names, constructors, imports, annotations, new expressions, methods, fields, locals (with conflict checks), and file names.  
-Symbol solving is improved by `--classpath`.
+Renames classes/constructors/imports/new expressions/methods/fields/locals with conflict checks; updates file names.  
+`--classpath` helps Symbol Solver.
 
 ---
 
-### 4) Humanify (pipeline)
+### 4) Annotate (NEW)
 ```bash
-java -jar java-humanify.jar humanify [provider/model/...] <srcDir> <outDir>
+java -jar java-humanify.jar annotate \
+--src <dir[,dir2,...]> \
+[--lang en|zh] \
+[--style concise|detailed] \
+[--overwrite] \
+[--provider dummy|openai|deepseek|local] \
+[--model <model-name>] \
+[--local-api ollama|openai] \
+[--endpoint http://localhost:11434] \
+[--timeout-sec 180] \
+[--batch 12]
 ```
+- **`--provider dummy`** → offline heuristics (no network)  
+- **OpenAI**: `OPENAI_API_KEY`  
+- **DeepSeek**: `DEEPSEEK_API_KEY`  
+- **Local**:
+  - `--local-api ollama` with `--endpoint http://localhost:11434`  
+  - `--local-api openai` with an OpenAI-compatible endpoint (e.g. `http://localhost:1234/v1`)  
 
-Creates intermediate `_pass1` (after class renames), then final output in `<outDir>`.
+---
 
-⸻
+### 5) Humanify (pipeline)
+```bash
+java -jar java-humanify.jar humanify \
+[provider/model/annotate opts...] \
+<srcDir> <outDir>
+```
+Creates `_pass1` (after class renames), then final output in `<outDir>`, and finally **annotates** it.
 
-## How it works
+**Common annotate flags via `humanify`:**
+- `--lang en|zh`
+- `--style concise|detailed`
+- `--overwrite`
 
-1. **Analyze** – collect per-method “snippets”: declaration, body, strings, exact methodSig, classFqn.  
-2. **Suggest** – LLM (or heuristic) returns a mapping object:  
-   - `classFqn: a.b.C -> a.b.NewName`  
-   - `methodSig: a.b.C.m(T1,T2) -> newMethodName`  
-   - `fieldFqn: a.b.C#x -> newFieldName`  
-   - `simple: fallback renames for locals/params`  
-3. **Apply** – perform AST-level renames with JavaParser + SymbolSolver so the output compiles.
-
-⸻
-
-## Troubleshooting
-
-- **google-java-format / module access error**  
-  Add JVM flag:  
-  ```bash
-  --add-exports jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED
-  ```
-
-- **Local model timeouts (Ollama)**  
-  Increase `--timeout-sec` (e.g. `--timeout-sec 300`)  
-  Ensure `ollama serve` is running and model is pulled.
-
-- **Symbol resolution misses**  
-  Add dependencies via `--classpath`.  
-
-⸻
+---
 
 ## Performance & Costs
 
-- Suggestion cost depends on text size; small projects are cheap.  
-- Local models are free but slower & less accurate.  
+- Rename “Suggest” cost depends on text size; small projects are cheap.  
+- Local models are free but typically slower and less accurate.  
+- `annotate --provider dummy` is offline & free; LLM doc quality is better but costs tokens.
 
-⸻
+---
 
 ## Contributing
 
-Issues and PRs are welcome! Please:  
-- Use feature branches  
-- Keep changes small & tested  
-- Follow existing code style  
+Issues and PRs are welcome! Please:
+- Use feature branches
+- Keep changes small & tested
+- Follow existing code style
 
-⸻
+---
 
 ## License
 
 This project is licensed under the **Apache-2.0 License**.  
-Copyright (c) 2025 Initial-One  
-
 See [LICENSE](./LICENSE) for details.
 
-⸻
+---
 
 ## Appendix: CLI help (short)
 
 ```bash
-java -jar java-humanify.jar analyze <srcDir> <snippets.json> [opts]
-java -jar java-humanify.jar suggest <snippets.json> <mapping.json> [opts]
-java -jar java-humanify.jar apply   <srcDir> <mapping.json> <outDir> [--classpath ...]
-java -jar java-humanify.jar humanify [provider/model/...] <srcDir> <outDir>
+java -jar java-humanify.jar analyze  <srcDir> <snippets.json> [opts]
+java -jar java-humanify.jar suggest  <snippets.json> <mapping.json> [opts]
+java -jar java-humanify.jar apply    <srcDir> <mapping.json> <outDir> [--classpath ...]
+java -jar java-humanify.jar annotate --src <dir[,dir2,...]> [--lang/--style/--overwrite ...]
+java -jar java-humanify.jar humanify <srcDir> <outDir> [provider/model/annotate opts...]
 ```
-
-Happy humanifying!

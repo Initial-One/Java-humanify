@@ -58,7 +58,6 @@ public class DeepSeekClient implements LlmClient {
             String body = callDeepSeek(prompt);
             String content = extractMessageContent(body);
 
-            // 兼容两种顶层：{"renames":[...]} 或 直接 [...]
             JsonNode root = tryParseJson(content);
             if (root == null) continue;
 
@@ -67,7 +66,6 @@ public class DeepSeekClient implements LlmClient {
             } else if (root.isArray()) {
                 appendRenames(out, root);
             } else {
-                // 万一是 {"simple":{...}, "classFqn":{...}...} 这种，也可忽略；上层有兜底
             }
         }
         return out;

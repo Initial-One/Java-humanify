@@ -53,13 +53,6 @@ public class SuggestCmd implements Runnable {
             description = "HTTP read/call timeout seconds for local provider")
     int timeoutSec;
 
-    @CommandLine.Option(names = "--ds-base", defaultValue = "https://api.deepseek.com",
-            description = "DeepSeek API base url")
-    String dsBase;
-
-    @CommandLine.Option(names = "--ds-key", description = "DeepSeek API key (fallback to env DEEPSEEK_API_KEY)")
-    String dsKey;
-
     /* ======== 输入数据结构 ======== */
     static class Snippet {
         public String file;
@@ -118,7 +111,7 @@ public class SuggestCmd implements Runnable {
             if ("openai".equalsIgnoreCase(provider)) {
                 mapping = suggestWithOpenAI(snippets, model, batch);
             } else if ("deepseek".equalsIgnoreCase(provider)) {
-                mapping = suggestWithDeepSeek(snippets, model, dsBase, dsKey, batch);
+                mapping = suggestWithDeepSeek(snippets, model, batch);
             } else if ("local".equalsIgnoreCase(provider)) {
                 mapping = suggestWithLocal(snippets, localApi, endpoint, model, batch);
             } else {
@@ -201,12 +194,8 @@ public class SuggestCmd implements Runnable {
     /* ================== DeepSeek provider ================== */
     private Mapping suggestWithDeepSeek(List<Snippet> snippets,
                                         String model,
-                                        String baseUrl,
-                                        String keyOpt,
                                         int batchSize) throws Exception {
-        String apiKey = (keyOpt != null && !keyOpt.isBlank())
-                ? keyOpt
-                : System.getenv("DEEPSEEK_API_KEY");
+        String apiKey = System.getenv("DEEPSEEK_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("[suggest/deepseek] DEEPSEEK_API_KEY missing. Fallback to dummy.");
             return suggestHeuristically(snippets);
@@ -214,7 +203,7 @@ public class SuggestCmd implements Runnable {
 
         // 注意：DeepSeekClient 在 com.initialone.jhumanify.llm 包
         com.initialone.jhumanify.llm.LlmClient client =
-                new com.initialone.jhumanify.llm.DeepSeekClient(apiKey, model, baseUrl, batchSize, 180);
+                new com.initialone.jhumanify.llm.DeepSeekClient(apiKey, model, batchSize);
 
         // 和 OpenAI 分支一致：准备 blocks -> 调 client -> 列表转 Mapping
         List<String> blocks = snippets.stream().map(this::formatSnippetBlock).toList();
