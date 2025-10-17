@@ -8,12 +8,13 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 一条命令串行执行：analyze -> suggest -> apply
+ * 一条命令串行执行：analyze -> suggest -> apply -> annotate
  *
  * 用法：
  *   java -jar java-humanify.jar humanify \
  *     --provider local --local-api ollama --endpoint http://localhost:11434 \
  *     --model qwen2.5:1.5b \
+ *     --max-concurrent 100 \
  *     samples/src samples/out-humanified
  */
 @CommandLine.Command(
@@ -49,6 +50,13 @@ public class HumanifyCmd implements Runnable {
     @CommandLine.Option(names = "--endpoint", defaultValue = "http://localhost:11434",
             description = "Local endpoint. OpenAI-compat: http://localhost:1234/v1; Ollama: http://localhost:11434")
     String endpoint;
+
+    /** 新增：统一的并发控制（同时在 suggest / annotate 传递），默认 100 */
+    @CommandLine.Option(
+            names = "--max-concurrent",
+            defaultValue = "100",
+            description = "Max concurrent LLM calls (applies to suggest & annotate)")
+    int maxConcurrent;
 
     /* 应用阶段参数（与 ApplyCmd 保持一致） */
     @CommandLine.Option(names = "--classpath", split = ":", description = "Extra classpath jars/dirs, separated by ':'")
@@ -110,7 +118,7 @@ public class HumanifyCmd implements Runnable {
 
             long t0 = System.currentTimeMillis();
 
-            /* ========== 1/3 analyze ========== */
+            /* ========== 1/4 analyze ========== */
             System.out.println("[humanify] 1/4 analyze...");
             List<String> analyzeArgs = List.of(src.toString(), snippets.toString());
             int rc1 = new CommandLine(new AnalyzeCmd()).execute(analyzeArgs.toArray(new String[0]));
@@ -118,15 +126,18 @@ public class HumanifyCmd implements Runnable {
             if (!Files.exists(snippets) || Files.size(snippets) == 0)
                 throw new IllegalStateException("snippets.json was not produced: " + snippets);
 
-            /* ========== 2/3 suggest ========== */
+            /* ========== 2/4 suggest ========== */
             System.out.println("[humanify] 2/4 suggest (" + provider + ")...");
             List<String> suggestArgs = new ArrayList<>();
-            // 选项（存在则加入）
             suggestArgs.addAll(List.of("--provider", provider));
             suggestArgs.addAll(List.of("--model", model));
             suggestArgs.addAll(List.of("--batch", Integer.toString(batch)));
 
-            // 仅当 SuggestCmd 声明了这些字段/选项时才附加（避免旧版本没有该选项时报错）
+            // 将并发参数传给 suggest（若 SuggestCmd 提供该字段）
+            if (hasField(SuggestCmd.class, "maxConcurrent")) {
+                suggestArgs.addAll(List.of("--max-concurrent", Integer.toString(maxConcurrent)));
+            }
+
             if (hasField(SuggestCmd.class, "localApi")) {
                 suggestArgs.addAll(List.of("--local-api", localApi));
             }
@@ -143,7 +154,7 @@ public class HumanifyCmd implements Runnable {
             if (!Files.exists(mapping) || Files.size(mapping) == 0)
                 throw new IllegalStateException("mapping.json was not produced: " + mapping);
 
-            /* ========== 3/3 apply ========== */
+            /* ========== 3/4 apply ========== */
             System.out.println("[humanify] 3/4 apply...");
             List<String> applyArgs = new ArrayList<>();
             if (classpath != null && !classpath.isEmpty() && hasField(ApplyCmd.class, "classpath")) {
@@ -161,52 +172,29 @@ public class HumanifyCmd implements Runnable {
             System.out.println("[humanify] 4/4 annotate...");
 
             List<String> annArgs = new ArrayList<>();
+            annArgs.add("--src");   annArgs.add(out.toString());
+            annArgs.add("--lang");  annArgs.add(lang != null ? lang : "en");
+            annArgs.add("--style"); annArgs.add(style != null ? style : "detailed");
+            if (overwriteDocs) annArgs.add("--overwrite");
+            annArgs.add("--provider"); annArgs.add(provider != null ? provider : "dummy");
+            annArgs.add("--model");    annArgs.add(model != null ? model : "gpt-4o-mini");
+            annArgs.add("--batch");    annArgs.add(Integer.toString(batch));
 
-            annArgs.add("--src");
-            annArgs.add(out.toString());
-
-            annArgs.add("--lang");
-            annArgs.add(lang != null ? lang : "en");
-
-            annArgs.add("--style");
-            annArgs.add(style != null ? style : "detailed");
-
-            if (overwriteDocs) {
-                annArgs.add("--overwrite");
-            }
-
-            annArgs.add("--provider");
-            annArgs.add(provider != null ? provider : "dummy");
-
-            annArgs.add("--model");
-            annArgs.add(model != null ? model : "gpt-4o-mini");
-
-            annArgs.add("--batch");
-            annArgs.add(Integer.toString(batch));
+            // 将并发参数传给 annotate（AnnotateCmd 已支持）
+            annArgs.add("--max-concurrent");
+            annArgs.add(Integer.toString(maxConcurrent));
 
             if ("local".equalsIgnoreCase(provider)) {
-                annArgs.add("--local-api");
-                annArgs.add((localApi != null && !localApi.isEmpty()) ? localApi : "ollama");
-
-                if (endpoint != null && !endpoint.isEmpty()) {
-                    annArgs.add("--endpoint");
-                    annArgs.add(endpoint);
-                }
-
-                annArgs.add("--timeout-sec");
-                annArgs.add(Integer.toString(180)); // 或自定义
+                annArgs.add("--local-api"); annArgs.add((localApi != null && !localApi.isEmpty()) ? localApi : "ollama");
+                if (endpoint != null && !endpoint.isEmpty()) { annArgs.add("--endpoint"); annArgs.add(endpoint); }
+                annArgs.add("--timeout-sec"); annArgs.add(Integer.toString(180));
             } else {
-                if (endpoint != null && !endpoint.isEmpty()) {
-                    annArgs.add("--endpoint");
-                    annArgs.add(endpoint);
-                }
-                annArgs.add("--timeout-sec");
-                annArgs.add(Integer.toString(180));
+                if (endpoint != null && !endpoint.isEmpty()) { annArgs.add("--endpoint"); annArgs.add(endpoint); }
+                annArgs.add("--timeout-sec"); annArgs.add(Integer.toString(180));
             }
 
             int rc4 = new CommandLine(new AnnotateCmd()).execute(annArgs.toArray(new String[0]));
             if (rc4 != 0) throw new IllegalStateException("annotate failed with code " + rc4);
-            
 
             // 可选格式化
             if (format) {

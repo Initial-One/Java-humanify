@@ -6,7 +6,7 @@ import picocli.CommandLine;
 @CommandLine.Command(
         name = "jhumanify",
         mixinStandardHelpOptions = true,
-        version = "0.2.0",
+        version = "0.3.0",
         subcommands = {
                 DecompileCmd.class,
                 AnalyzeCmd.class,

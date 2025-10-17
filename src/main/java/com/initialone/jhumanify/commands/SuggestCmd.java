@@ -10,10 +10,14 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import okhttp3.*;
 import picocli.CommandLine;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.ToIntFunction;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -52,6 +56,26 @@ public class SuggestCmd implements Runnable {
     @CommandLine.Option(names = "--timeout-sec", defaultValue = "180",
             description = "HTTP read/call timeout seconds for local provider")
     int timeoutSec;
+
+    @CommandLine.Option(names = "--token-budget", defaultValue = "9000",
+            description = "Approx tokens per LLM batch (rough estimate)")
+    int tokenBudget;
+
+    @CommandLine.Option(names = "--max-concurrent", defaultValue = "100",
+            description = "Max concurrent LLM calls")
+    int maxConcurrent;
+
+    @CommandLine.Option(names = "--retries", defaultValue = "3",
+            description = "Transient network retries for each LLM call")
+    int retries;
+
+    @CommandLine.Option(names = "--head", defaultValue = "40",
+            description = "Head lines kept in each code block")
+    int headLines;
+
+    @CommandLine.Option(names = "--tail", defaultValue = "30",
+            description = "Tail lines kept in each code block")
+    int tailLines;
 
     /* ======== 输入数据结构 ======== */
     static class Snippet {
@@ -170,21 +194,21 @@ public class SuggestCmd implements Runnable {
             return suggestHeuristically(snippets);
         }
 
-        // 1) 准备带 META 的片段
+        // 1) 准备带 META 的片段（截断头/尾）
         List<String> blocks = snippets.stream()
-                .map(this::formatSnippetBlock) // 已包含 META 头 + 代码块
+                .map(s -> formatSnippetBlockTruncated(s, headLines, tailLines))
                 .toList();
 
-        // 2) 走统一的 LLM 客户端（支持分批）
+        // 2) 统一 LLM 客户端；但分批并发在本类实现
         com.initialone.jhumanify.llm.LlmClient client =
                 new com.initialone.jhumanify.llm.OpenAiClient(apiKey, model, batchSize);
 
-        List<RenameSuggestion> items = client.suggestRenames(blocks);
+        List<RenameSuggestion> items = callInBatches(client, blocks, tokenBudget, batch, maxConcurrent, retries);
 
         // 3) 结构化 -> Mapping
         Mapping raw = suggestionsToMapping(items, snippets);
 
-        // 4) 键上锁 + 清洗兜底（非常关键，过滤掉模型可能多产出的无关键）
+        // 4) 键上锁 + 清洗
         Allowed allow = buildAllowed(snippets);
         Mapping cleaned = sanitizeAndFill(raw, allow, snippets);
 
@@ -201,18 +225,17 @@ public class SuggestCmd implements Runnable {
             return suggestHeuristically(snippets);
         }
 
-        // 注意：DeepSeekClient 在 com.initialone.jhumanify.llm 包
         com.initialone.jhumanify.llm.LlmClient client =
                 new com.initialone.jhumanify.llm.DeepSeekClient(apiKey, model, batchSize);
 
-        // 和 OpenAI 分支一致：准备 blocks -> 调 client -> 列表转 Mapping
-        List<String> blocks = snippets.stream().map(this::formatSnippetBlock).toList();
-        List<com.initialone.jhumanify.model.RenameSuggestion> items = client.suggestRenames(blocks);
+        List<String> blocks = snippets.stream()
+                .map(s -> formatSnippetBlockTruncated(s, headLines, tailLines))
+                .toList();
 
-        // 如果你沿用原来的 RenameSuggestion（com.example 包），把 import/包名对齐即可。
-        // 下面这行是你已有的方法：用 {class,method,field,var} 建议回填到精确键
+        List<com.initialone.jhumanify.model.RenameSuggestion> items =
+                callInBatchesRaw(client, blocks, tokenBudget, batch, maxConcurrent, retries);
+
         Mapping m0 = suggestionsToMapping(
-                // 若包名不同，做一次转换或直接统一到你当前工程用的 RenameSuggestion 类
                 items.stream().map(r -> {
                     RenameSuggestion x = new RenameSuggestion();
                     x.kind = r.kind; x.oldName = r.oldName; x.newName = r.newName;
@@ -229,15 +252,16 @@ public class SuggestCmd implements Runnable {
                                      String endpoint,
                                      String model,
                                      int batchSize) throws Exception {
-        // 新的 LocalClient：支持 openai-compat / ollama
         com.initialone.jhumanify.llm.LlmClient client =
                 new com.initialone.jhumanify.llm.LocalClient(localApi, endpoint, model, batchSize, timeoutSec);
 
-        // 和 OpenAI/DeepSeek 分支相同：准备 blocks → 要求重命名 → 列表转 Mapping
-        List<String> blocks = snippets.stream().map(this::formatSnippetBlock).toList();
-        List<com.initialone.jhumanify.model.RenameSuggestion> items = client.suggestRenames(blocks);
+        List<String> blocks = snippets.stream()
+                .map(s -> formatSnippetBlockTruncated(s, headLines, tailLines))
+                .toList();
 
-        // 如果你的 RenameSuggestion 仍在 com.example 包，做一次简单转换即可：
+        List<com.initialone.jhumanify.model.RenameSuggestion> items =
+                callInBatchesRaw(client, blocks, tokenBudget, batch, maxConcurrent, retries);
+
         List<RenameSuggestion> items2 = items.stream().map(r -> {
             RenameSuggestion z = new RenameSuggestion();
             z.kind = r.kind; z.oldName = r.oldName; z.newName = r.newName;
@@ -271,6 +295,27 @@ public class SuggestCmd implements Runnable {
                 .append(s.code == null ? "" : s.code)
                 .append("\n```\n");
 
+        return sb.toString();
+    }
+
+    // 只保留头/尾若干行，显著降低 token
+    private String formatSnippetBlockTruncated(Snippet s, int head, int tail) {
+        String code = s.code == null ? "" : s.code;
+        String trimmed = trimCode(code, head, tail);
+        Snippet copy = new Snippet();
+        copy.pkg = s.pkg; copy.className = s.className; copy.classFqn = s.classFqn;
+        copy.methodName = s.methodName; copy.qualifiedSignature = s.qualifiedSignature;
+        copy.paramTypes = s.paramTypes; copy.strings = s.strings; copy.code = trimmed;
+        return formatSnippetBlock(copy);
+    }
+
+    private static String trimCode(String code, int head, int tail) {
+        String[] lines = code.split("\\R", -1);
+        if (lines.length <= head + tail + 5) return code; // 小文件不截
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(head, lines.length); i++) sb.append(lines[i]).append('\n');
+        sb.append("// ... (trimmed) ...\n");
+        for (int i = Math.max(lines.length - tail, 0); i < lines.length; i++) sb.append(lines[i]).append('\n');
         return sb.toString();
     }
 
@@ -355,5 +400,108 @@ public class SuggestCmd implements Runnable {
         if (fqn == null || fqn.isBlank()) return newSimple;
         int i = fqn.lastIndexOf('.');
         return i < 0 ? newSimple : fqn.substring(0, i) + "." + newSimple;
+    }
+
+    /* ======== 批量并发 + 重试 ======== */
+
+    private static int approxTokens(String s) {
+        // 粗估：1 token ≈ 3.5 字符（足够做分批）
+        return (int) Math.ceil((s == null ? 0 : s.length()) / 3.5);
+    }
+
+    private static <T> List<List<T>> batchByBudget(
+            List<T> items, ToIntFunction<T> tokenizer, int tokenBudgetPerBatch, int maxItemsPerBatch) {
+        List<List<T>> batches = new ArrayList<>();
+        List<T> cur = new ArrayList<>();
+        int curTok = 0;
+        for (T it : items) {
+            int t = Math.max(1, tokenizer.applyAsInt(it));
+            boolean overflow = (!cur.isEmpty()) &&
+                    (curTok + t > tokenBudgetPerBatch || cur.size() >= maxItemsPerBatch);
+            if (overflow) { batches.add(cur); cur = new ArrayList<>(); curTok = 0; }
+            cur.add(it); curTok += t;
+            if (curTok > tokenBudgetPerBatch) { batches.add(cur); cur = new ArrayList<>(); curTok = 0; }
+        }
+        if (!cur.isEmpty()) batches.add(cur);
+        return batches;
+    }
+
+    // LlmClient.suggestRenames(List<String>) -> List<RenameSuggestion>
+    private List<RenameSuggestion> callInBatches(
+            com.initialone.jhumanify.llm.LlmClient client,
+            List<String> blocks,
+            int tokenBudget, int maxItemsPerBatch, int maxConcurrent, int retries
+    ) throws Exception {
+        List<List<String>> batches = batchByBudget(blocks, SuggestCmd::approxTokens, tokenBudget, maxItemsPerBatch);
+        System.out.println("[suggest] total blocks=" + blocks.size() + ", batches=" + batches.size());
+        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, maxConcurrent));
+        try {
+            List<Future<List<RenameSuggestion>>> futures = new ArrayList<>();
+            AtomicInteger idx = new AtomicInteger(0);
+            for (List<String> b : batches) {
+                futures.add(pool.submit(() -> {
+                    int i = idx.incrementAndGet();
+                    System.out.println("[suggest] LLM batch " + i + "/" + batches.size() + " items=" + b.size());
+                    return withRetry(retries, 400, () -> client.suggestRenames(b));
+                }));
+            }
+            List<RenameSuggestion> all = new ArrayList<>();
+            for (Future<List<RenameSuggestion>> f : futures) {
+                List<RenameSuggestion> part = f.get();
+                if (part != null) all.addAll(part);
+            }
+            return all;
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    // 对 deepseek/local 的 RenameSuggestion 原型（若 client 返回你自定义的类型）
+    private <T> List<T> callInBatchesRaw(
+            com.initialone.jhumanify.llm.LlmClient client,
+            List<String> blocks,
+            int tokenBudget, int maxItemsPerBatch, int maxConcurrent, int retries
+    ) throws Exception {
+        List<List<String>> batches = batchByBudget(blocks, SuggestCmd::approxTokens, tokenBudget, maxItemsPerBatch);
+        System.out.println("[suggest] total blocks=" + blocks.size() + ", batches=" + batches.size());
+        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, maxConcurrent));
+        try {
+            List<Future<List<T>>> futures = new ArrayList<>();
+            AtomicInteger idx = new AtomicInteger(0);
+            for (List<String> b : batches) {
+                futures.add(pool.submit(() -> {
+                    int i = idx.incrementAndGet();
+                    System.out.println("[suggest] LLM batch " + i + "/" + batches.size() + " items=" + b.size());
+                    @SuppressWarnings("unchecked")
+                    List<T> part = (List<T>) withRetry(retries, 400, () -> client.suggestRenames(b));
+                    return part;
+                }));
+            }
+            List<T> all = new ArrayList<>();
+            for (Future<List<T>> f : futures) {
+                List<T> part = f.get();
+                if (part != null) all.addAll(part);
+            }
+            return all;
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    private static <T> T withRetry(int maxAttempts, long baseBackoffMs, Callable<T> op) throws Exception {
+        int attempts = 0;
+        long backoff = baseBackoffMs;
+        while (true) {
+            try { return op.call(); }
+            catch (IOException e) {
+                boolean transientErr =
+                        (e instanceof java.io.EOFException) ||
+                                (e instanceof java.net.SocketTimeoutException) ||
+                                (e instanceof java.net.ProtocolException);
+                if (!transientErr || ++attempts >= Math.max(1, maxAttempts)) throw e;
+                Thread.sleep(backoff);
+                backoff = Math.min(backoff * 2, 4000);
+            }
+        }
     }
 }

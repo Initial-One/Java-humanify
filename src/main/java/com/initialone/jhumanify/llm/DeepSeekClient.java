@@ -5,8 +5,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import okhttp3.*;
 
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -40,10 +43,13 @@ public class DeepSeekClient implements LlmClient {
 
         this.batchSize = Math.max(1, batchSize);
         this.http = new OkHttpClient.Builder()
+                .retryOnConnectionFailure(true)
                 .connectTimeout(Duration.ofSeconds(20))
                 .readTimeout(Duration.ofSeconds(timeoutSec))
                 .writeTimeout(Duration.ofSeconds(timeoutSec))
                 .callTimeout(Duration.ofSeconds(timeoutSec + 30))
+                // 优先 HTTP/2（避免 chunked），回退到 HTTP/1.1
+                .protocols(Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1))
                 .build();
     }
 
@@ -66,6 +72,7 @@ public class DeepSeekClient implements LlmClient {
             } else if (root.isArray()) {
                 appendRenames(out, root);
             } else {
+                // ignore
             }
         }
         return out;
@@ -91,16 +98,37 @@ public class DeepSeekClient implements LlmClient {
                 .url(url)
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                // 关键：避免 gzip+chunked 的边缘坑 & 避免复用陈旧连接
+                .header("Accept-Encoding", "identity")
+                .header("Connection", "close")
                 .post(RequestBody.create(payload, MediaType.parse("application/json")))
                 .build();
 
         try (Response resp = http.newCall(req).execute()) {
             if (!resp.isSuccessful()) {
-                throw new IllegalStateException("DeepSeek HTTP " + resp.code() + " " + resp.message());
+                String err = safeReadBody(resp.body());
+                throw new IllegalStateException("DeepSeek HTTP " + resp.code() +
+                        " TE=" + resp.header("Transfer-Encoding") +
+                        " CE=" + resp.header("Content-Encoding") +
+                        " body=" + err);
             }
             ResponseBody rb = resp.body();
             if (rb == null) throw new IllegalStateException("Empty body");
-            return rb.string();
+            byte[] bytes = rb.bytes(); // 不用 string()，避开 BOM/charset 额外路径
+            MediaType mt = rb.contentType();
+            Charset cs = (mt != null && mt.charset() != null) ? mt.charset() : StandardCharsets.UTF_8;
+            return new String(bytes, cs);
+        }
+    }
+
+    private static String safeReadBody(ResponseBody b) {
+        if (b == null) return "";
+        try {
+            byte[] bytes = b.bytes();
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "<" + e.getClass().getSimpleName() + ">";
         }
     }
 
