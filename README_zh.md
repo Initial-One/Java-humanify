@@ -1,4 +1,6 @@
 # Java Humanify
+[![English](https://img.shields.io/badge/README-English-blue)](./README.md)
+[![简体中文](https://img.shields.io/badge/README-简体中文-brightgreen)](./README_zh.md)
 > 用大语言模型（OpenAI、DeepSeek、Ollama 等）**人性化**反编译/混淆后的 Java 代码：更好的命名 + 自动 Javadoc。
 
 Java Humanify 使用 LLM 为 **类 / 方法 / 字段 / 局部变量**生成更可读的名称，并可为 **类 / 构造器 / 方法**自动生成 Javadoc。  

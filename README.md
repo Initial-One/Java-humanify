@@ -1,4 +1,6 @@
 # Java Humanify
+[![English](https://img.shields.io/badge/README-English-blue)](./README.md)
+[![简体中文](https://img.shields.io/badge/README-简体中文-brightgreen)](./README_zh.md)
 > Humanize decompiled/obfuscated Java code with LLMs (OpenAI, DeepSeek, Ollama, etc.): better names + automatic Javadoc.
 
 Java Humanify uses LLMs to generate more readable names for **classes / methods / fields / local variables**, and can automatically create Javadoc for **classes / constructors / methods**.  
