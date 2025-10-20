@@ -148,7 +148,5 @@ java -jar java-humanify.jar apply    <srcDir> <mapping.json> <outDir> [--classpa
 java -jar java-humanify.jar annotate --src <dir[,dir2,...]> [--lang/--style/--overwrite ...]
 java -jar java-humanify.jar humanify <srcDir> <outDir> [provider/model/annotate opts...]
 ```
-<details>
-  <summary>Contact me</summary>
-  <img src="./assets/wechat-qr.jpg" width="160" alt="WeChat QR">
-</details>
+
+[![WeChat](https://img.shields.io/badge/WeChat-Add-07C160?logo=wechat&logoColor=white)](./assets/wechat-qr.jpg)
