@@ -1,6 +1,7 @@
 # Java Humanify
 [![English](https://img.shields.io/badge/README-English-blue)](./README.md)
 [![简体中文](https://img.shields.io/badge/README-简体中文-brightgreen)](./README_zh.md)
+[![WeChat](https://img.shields.io/badge/WeChat-添加-07C160?logo=wechat&logoColor=white)](./assets/wechat-qr.jpg)
 > 用大语言模型（OpenAI、DeepSeek、Ollama 等）**人性化**反编译/混淆后的 Java 代码：更好的命名 + 自动 Javadoc。
 
 Java Humanify 使用 LLM 为 **类 / 方法 / 字段 / 局部变量**生成更可读的名称，并可为 **类 / 构造器 / 方法**自动生成 Javadoc。  
@@ -147,4 +148,3 @@ java -jar java-humanify.jar apply    <srcDir> <mapping.json> <outDir> [--classpa
 java -jar java-humanify.jar annotate --src <dir[,dir2,...]> [--lang/--style/--overwrite ...]
 java -jar java-humanify.jar humanify <srcDir> <outDir> [provider/model/annotate opts...]
 ```
-[![WeChat](https://img.shields.io/badge/微信-添加-07C160?logo=wechat&logoColor=white)](./assets/wechat-qr.jpg)
