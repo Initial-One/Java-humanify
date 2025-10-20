@@ -1,4 +1,4 @@
-# Java Humanify 
+# Java Humanify
 [![English](https://img.shields.io/badge/README-English-blue)](./README.md)
 [![简体中文](https://img.shields.io/badge/README-简体中文-brightgreen)](./README_zh.md)
 > Humanize decompiled/obfuscated Java code with LLMs (OpenAI, DeepSeek, Ollama, etc.): better names + automatic Javadoc.
