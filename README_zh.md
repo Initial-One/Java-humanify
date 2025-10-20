@@ -8,6 +8,60 @@ Java Humanify 使用 LLM 为 **类 / 方法 / 字段 / 局部变量**生成更�
 
 ---
 
+## 为什么需要它
+
+反编译 / 压缩 / 混淆后的 Java 代码非常难读：
+
+```java
+package demo.mix;public final class a{private static final int[] O={0,1,1,2};private a(){}public static int h(String s){long x=0x811c9dc5L;if(s==null)return 0;int i=0,n=s.length(),j=O[2];while(i<n){char c=s.charAt(i++);x^=c;x*=0x01000193L;x&=0xffffffffL;j^=(c<<1);j^=j>>>7;if((i&3)==0)x^=(j&0xff);}return (int)x;}
+```
+
+Java Humanify 会对标识符进行重命名：
+
+```java
+package demo.mix;
+
+/**
+ * 使用 FNV-1a 并混入额外状态，计算输入字符串的 32 位哈希值。
+ */
+public final class HashCalculator {
+
+    private static final int[] O = { 0, 1, 1, 2 };
+
+    /**
+     * 私有构造器，防止实例化该工具类。
+     */
+    private HashCalculator() {}
+
+    /**
+     * 基于 FNV-1a 并混入额外状态，计算输入字符串的 32 位哈希值。
+     *
+     * @param inputString 参数
+     * @return 返回值
+     */
+    public static int calculateHash(String inputString) {
+        long storedValue = 0x811c9dc5L;
+        if (inputString == null) return 0;
+        int index = 0, stringLength = inputString.length(), hashState = O[2];
+        while (index < stringLength) {
+            char currentChar = inputString.charAt(index++);
+            storedValue ^= currentChar;
+            storedValue *= 0x01000193L;
+            storedValue &= 0xffffffffL;
+            hashState ^= (currentChar << 1);
+            hashState ^= hashState >>> 7;
+            if ((index & 3) == 0) storedValue ^= (hashState & 0xff);
+        }
+        return (int) storedValue;
+    }
+}
+```
+
+LLM **不会**触碰你的代码结构。  
+它只提出名称/注释建议；实际重命名在 AST 层结合符号解析完成；构造器/imports/文件名等会同步更新。
+
+---
+
 ## 主要特性
 
 - **可插拔 LLM**：OpenAI / DeepSeek / 本地（Ollama、OpenAI 兼容端点）。
