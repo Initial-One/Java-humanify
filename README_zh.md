@@ -94,56 +94,23 @@ analyze  →  suggest  →  apply  →  annotate
 ```bash
 # OpenAI
 export OPENAI_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify   --provider openai   --model gpt-4o-mini   --lang zh   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider openai --model gpt-4o-mini --lang zh samples/src samples/out
 ```
 
 ```bash
 # DeepSeek
 export DEEPSEEK_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify   --provider deepseek   --model deepseek-chat   --lang zh   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider deepseek --model deepseek-chat --lang zh samples/src samples/out
 ```
 
 ```bash
 # 本地（Ollama）
 # 确保模型已拉取：ollama run llama3.1:8b（或你喜欢的任意模型）
-java -jar target/java-humanify-*.jar humanify   --provider local   --local-api ollama   --endpoint http://localhost:11434   --model llama3.1:8b   --lang zh   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider local --local-api ollama --endpoint http://localhost:11434 --model llama3.1:8b --lang zh samples/src samples/out
 ```
 
 > `humanify` 执行：1) analyze → 2) suggest → 3) apply → 4) annotate  
 > `--lang/--style/--overwrite` 影响 **annotate** 阶段。`--provider dummy` 为离线启发式。
-
----
-
-## 子命令速览与常用参数
-
-### 1) analyze
-```bash
-java -jar xxx.jar analyze <SRC_DIR> <snippets.json>   [--maxBodyLen 6400]   [--includeStrings true|false]   [--include-ctors true|false]   [--include-class true|false]   [--exclude <glob1,glob2,...>]
-```
-- `--maxBodyLen`：每个片段正文最大字符数（避免 token 过大）。  
-- `--includeStrings`：采集字符串字面量（URL/SQL/日志有助于命名）。  
-- `--exclude`：**glob** 排除（例：`**/test/**,**/generated/**`）。
-
-### 2) suggest
-```bash
-java -jar xxx.jar suggest <snippets.json> <mapping.json>   --provider dummy|openai|local|deepseek   --model gpt-4o-mini   [--local-api openai|ollama]   [--endpoint http://host:port]   [--timeout-sec 180]   [--batch 12]   [--max-concurrent 100]   [--head 40 --tail 30]
-```
-
-### 3) apply
-```bash
-java -jar xxx.jar apply <SRC_DIR> <mapping.json> <OUT_DIR>   [--classpath <jarOrDir:jarOrDir:...>]   [--format | --no-format]
-```
-- Windows 的分隔符用 `;`，*nix 用 `:`。提供 classpath 有助于符号解析。
-
-### 4) annotate
-```bash
-java -jar xxx.jar annotate   --src <DIR> [--src <DIR2> ...]   --lang zh|en   --style concise|detailed   --provider dummy|openai|local|deepseek   --model gpt-4o-mini   [--local-api openai|ollama]   [--endpoint http://host:port]   [--timeout-sec 180]   [--batch 12]   [--max-concurrent 100]   [--overwrite]
-```
-
-### 5) humanify（一条龙）
-```bash
-java -jar xxx.jar humanify <SRC_DIR> <OUT_DIR>   --provider dummy|openai|local|deepseek   --model <name>   --lang zh|en   [其它 suggest/annotate 相关参数...]
-```
 
 ---
 

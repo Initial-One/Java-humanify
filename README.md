@@ -95,56 +95,23 @@ analyze  →  suggest  →  apply  →  annotate
 ```bash
 # OpenAI
 export OPENAI_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify   --provider openai   --model gpt-4o-mini   --lang zh   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider openai --model gpt-4o-mini --lang zh samples/src samples/out
 ```
 
 ```bash
 # DeepSeek
 export DEEPSEEK_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify   --provider deepseek   --model deepseek-chat   --lang zh   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider deepseek --model deepseek-chat --lang zh samples/src samples/out
 ```
 
 ```bash
 # Local (Ollama)
 # Make sure the model is pulled: ollama run llama3.1:8b (or any model you prefer)
-java -jar target/java-humanify-*.jar humanify   --provider local   --local-api ollama   --endpoint http://localhost:11434   --model llama3.1:8b   --lang zh   samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider local --local-api ollama --endpoint http://localhost:11434 --model llama3.1:8b --lang zh samples/src samples/out
 ```
 
 > Execution order of `humanify`: 1) analyze → 2) suggest → 3) apply → 4) annotate  
 > `--lang/--style/--overwrite` affect the **annotate** phase. `--provider dummy` uses offline heuristics.
-
----
-
-## Subcommands & Common Options
-
-### 1) analyze
-```bash
-java -jar xxx.jar analyze <SRC_DIR> <snippets.json>   [--maxBodyLen 6400]   [--includeStrings true|false]   [--include-ctors true|false]   [--include-class true|false]   [--exclude <glob1,glob2,...>]
-```
-- `--maxBodyLen`: maximum characters captured per snippet body (helps avoid excessive tokens).  
-- `--includeStrings`: capture string literals (URLs/SQL/logs often help naming).  
-- `--exclude`: **glob** exclusions (e.g., `**/test/**,**/generated/**`).
-
-### 2) suggest
-```bash
-java -jar xxx.jar suggest <snippets.json> <mapping.json>   --provider dummy|openai|local|deepseek   --model gpt-4o-mini   [--local-api openai|ollama]   [--endpoint http://host:port]   [--timeout-sec 180]   [--batch 12]   [--max-concurrent 100]   [--head 40 --tail 30]
-```
-
-### 3) apply
-```bash
-java -jar xxx.jar apply <SRC_DIR> <mapping.json> <OUT_DIR>   [--classpath <jarOrDir:jarOrDir:...>]   [--format | --no-format]
-```
-- On Windows, use `;` as the path separator; on *nix, use `:`. Providing a classpath can improve symbol resolution.
-
-### 4) annotate
-```bash
-java -jar xxx.jar annotate   --src <DIR> [--src <DIR2> ...]   --lang zh|en   --style concise|detailed   --provider dummy|openai|local|deepseek   --model gpt-4o-mini   [--local-api openai|ollama]   [--endpoint http://host:port]   [--timeout-sec 180]   [--batch 12]   [--max-concurrent 100]   [--overwrite]
-```
-
-### 5) humanify (one-shot)
-```bash
-java -jar xxx.jar humanify <SRC_DIR> <OUT_DIR>   --provider dummy|openai|local|deepseek   --model <name>   --lang zh|en   [other suggest/annotate related options...]
-```
 
 ---
 
