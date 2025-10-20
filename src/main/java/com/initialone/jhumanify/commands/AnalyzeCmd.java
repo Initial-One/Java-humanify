@@ -25,24 +25,9 @@ public class AnalyzeCmd implements Runnable {
     @CommandLine.Parameters(index = "1", description = "Output snippets.json path")
     String outJson;
 
-    @CommandLine.Option(names = "--maxBodyLen", defaultValue = "6400",
+    @CommandLine.Option(names = "--maxBodyLen", defaultValue = "12000",
             description = "Max characters of body captured per snippet")
     int maxBodyLen;
-
-    @CommandLine.Option(names = "--includeStrings", defaultValue = "true",
-            description = "Collect string literals for extra semantic hints")
-    boolean includeStrings;
-
-    @CommandLine.Option(names = "--exclude", description = "Glob to exclude (repeatable)", split = ",")
-    List<String> excludes = new ArrayList<>();
-
-    @CommandLine.Option(names = "--include-ctors", defaultValue = "true",
-            description = "Also include constructor snippets")
-    boolean includeCtors;
-
-    @CommandLine.Option(names = "--include-class", defaultValue = "true",
-            description = "If a class has no methods/constructors, include a class-level snippet")
-    boolean includeClassSnippet;
 
     static class Snippet {
         public String file;          // relative path
@@ -62,17 +47,12 @@ public class AnalyzeCmd implements Runnable {
         try {
             Path root = Paths.get(srcDir);
             JavaParser parser = new JavaParser();
-            List<PathMatcher> excludeMatchers = excludes.stream()
-                    .map(glob -> FileSystems.getDefault().getPathMatcher("glob:" + glob))
-                    .collect(Collectors.toList());
 
             List<Snippet> out = new ArrayList<>();
             int methodCount = 0, ctorCount = 0, classCount = 0;
 
             try (var paths = Files.walk(root)) {
                 for (Path p : paths.filter(this::isJavaFile).collect(Collectors.toList())) {
-                    if (isExcluded(root, p, excludeMatchers)) continue;
-
                     ParseResult<CompilationUnit> res = parser.parse(p);
                     if (!res.isSuccessful() || res.getResult().isEmpty()) {
                         System.err.println("[analyze] parse fail: " + p);
@@ -100,7 +80,7 @@ public class AnalyzeCmd implements Runnable {
                             s.qualifiedSignature = classFqn + "." + s.methodName + "(" + String.join(",", s.paramTypes) + ")";
                             String body = md.getBody().map(Object::toString).orElse("{}");
                             s.code = truncate(s.decl + "\n" + body, maxBodyLen);
-                            if (includeStrings) {
+                            if (true) {
                                 s.strings.addAll(
                                         md.findAll(StringLiteralExpr.class).stream()
                                                 .map(StringLiteralExpr::asString)
@@ -114,37 +94,35 @@ public class AnalyzeCmd implements Runnable {
                         }
 
                         // -------- ctors --------
-                        if (includeCtors) {
-                            for (ConstructorDeclaration ctor : cd.getConstructors()) {
-                                Snippet s = new Snippet();
-                                s.file = root.relativize(p).toString();
-                                s.pkg = pkg;
-                                s.classFqn = classFqn;
-                                s.className = className;
-                                s.methodName = ctor.getNameAsString(); // 与类同名
-                                s.paramTypes = ctor.getParameters().stream()
-                                        .map(param -> param.getType().toString())
-                                        .collect(Collectors.toList());
-                                s.decl = ctor.getDeclarationAsString(false, false, false);
-                                s.qualifiedSignature = classFqn + "." + s.methodName + "(" + String.join(",", s.paramTypes) + ")";
-                                String body = ctor.getBody().toString();
-                                s.code = truncate(s.decl + "\n" + body, maxBodyLen);
-                                if (includeStrings) {
-                                    s.strings.addAll(
-                                            ctor.findAll(StringLiteralExpr.class).stream()
-                                                    .map(StringLiteralExpr::asString)
-                                                    .distinct()
-                                                    .limit(64)
-                                                    .toList()
-                                    );
-                                }
-                                out.add(s);
-                                ctorCount++;
+                        for (ConstructorDeclaration ctor : cd.getConstructors()) {
+                            Snippet s = new Snippet();
+                            s.file = root.relativize(p).toString();
+                            s.pkg = pkg;
+                            s.classFqn = classFqn;
+                            s.className = className;
+                            s.methodName = ctor.getNameAsString(); // 与类同名
+                            s.paramTypes = ctor.getParameters().stream()
+                                    .map(param -> param.getType().toString())
+                                    .collect(Collectors.toList());
+                            s.decl = ctor.getDeclarationAsString(false, false, false);
+                            s.qualifiedSignature = classFqn + "." + s.methodName + "(" + String.join(",", s.paramTypes) + ")";
+                            String body = ctor.getBody().toString();
+                            s.code = truncate(s.decl + "\n" + body, maxBodyLen);
+                            if (true) {
+                                s.strings.addAll(
+                                        ctor.findAll(StringLiteralExpr.class).stream()
+                                                .map(StringLiteralExpr::asString)
+                                                .distinct()
+                                                .limit(64)
+                                                .toList()
+                                );
                             }
+                            out.add(s);
+                            ctorCount++;
                         }
 
                         // -------- class-level (only if no methods/ctors) --------
-                        if (includeClassSnippet && cd.getMethods().isEmpty() && cd.getConstructors().isEmpty()) {
+                        if (cd.getMethods().isEmpty() && cd.getConstructors().isEmpty()) {
                             Snippet s = new Snippet();
                             s.file = root.relativize(p).toString();
                             s.pkg = pkg;
@@ -155,7 +133,7 @@ public class AnalyzeCmd implements Runnable {
                             s.decl = (cd.isInterface() ? "interface " : "class ") + className;
                             s.qualifiedSignature = classFqn; // 用类全名作为“签名”
                             s.code = truncate(cd.toString(), maxBodyLen);
-                            if (includeStrings) {
+                            if (true) {
                                 s.strings.addAll(
                                         cd.findAll(StringLiteralExpr.class).stream()
                                                 .map(StringLiteralExpr::asString)

@@ -2,6 +2,7 @@ package com.initialone.jhumanify.commands;
 
 import com.initialone.jhumanify.llm.DeepSeekClient;
 import com.initialone.jhumanify.llm.LlmClient;
+import com.initialone.jhumanify.llm.LlmOptions;
 import com.initialone.jhumanify.llm.OpenAiClient;
 import com.initialone.jhumanify.model.RenameSuggestion;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -26,56 +27,23 @@ import java.util.stream.Collectors;
         description = "Generate rename mapping from snippets.json via OpenAI or local heuristic"
 )
 public class SuggestCmd implements Runnable {
+    @CommandLine.Mixin
+    LlmOptions llm;
 
+    int codeLines = 50;
     @CommandLine.Parameters(index = "0", description = "Input snippets.json (from analyze)")
     String snippetsJson;
 
     @CommandLine.Parameters(index = "1", description = "Output mapping.json")
     String mappingJson;
 
-    @CommandLine.Option(names = "--provider", defaultValue = "dummy",
-            description = "dummy|openai|local|deepseek")
-    String provider;
-
-    @CommandLine.Option(names = "--model", defaultValue = "gpt-4o-mini",
-            description = "Model name (OpenAI/local/deepseek)")
-    String model;
-
-    @CommandLine.Option(names = "--batch", defaultValue = "12",
-            description = "Max snippets per LLM batch")
-    int batch;
-
-    @CommandLine.Option(names = "--local-api", defaultValue = "ollama",
-            description = "When --provider=local: openai|ollama")
-    String localApi;
-
-    @CommandLine.Option(names = "--endpoint", defaultValue = "http://localhost:11434",
-            description = "Local endpoint. OpenAI-compat: http://localhost:1234/v1; Ollama: http://localhost:11434")
-    String endpoint;
-
-    @CommandLine.Option(names = "--timeout-sec", defaultValue = "180",
-            description = "HTTP read/call timeout seconds for local provider")
-    int timeoutSec;
-
     @CommandLine.Option(names = "--token-budget", defaultValue = "9000",
             description = "Approx tokens per LLM batch (rough estimate)")
     int tokenBudget;
 
-    @CommandLine.Option(names = "--max-concurrent", defaultValue = "100",
-            description = "Max concurrent LLM calls")
-    int maxConcurrent;
-
     @CommandLine.Option(names = "--retries", defaultValue = "3",
             description = "Transient network retries for each LLM call")
     int retries;
-
-    @CommandLine.Option(names = "--head", defaultValue = "40",
-            description = "Head lines kept in each code block")
-    int headLines;
-
-    @CommandLine.Option(names = "--tail", defaultValue = "30",
-            description = "Tail lines kept in each code block")
-    int tailLines;
 
     /* ======== 输入数据结构 ======== */
     static class Snippet {
@@ -132,12 +100,12 @@ public class SuggestCmd implements Runnable {
             Mapping mapping;
 
             // 1) 先拿“原始建议结果”
-            if ("openai".equalsIgnoreCase(provider)) {
-                mapping = suggestWithOpenAI(snippets, model, batch);
-            } else if ("deepseek".equalsIgnoreCase(provider)) {
-                mapping = suggestWithDeepSeek(snippets, model, batch);
-            } else if ("local".equalsIgnoreCase(provider)) {
-                mapping = suggestWithLocal(snippets, localApi, endpoint, model, batch);
+            if ("openai".equalsIgnoreCase(llm.provider)) {
+                mapping = suggestWithOpenAI(snippets, llm.model, llm.batch);
+            } else if ("deepseek".equalsIgnoreCase(llm.provider)) {
+                mapping = suggestWithDeepSeek(snippets, llm.model, llm.batch);
+            } else if ("local".equalsIgnoreCase(llm.provider)) {
+                mapping = suggestWithLocal(snippets, llm.localApi, llm.endpoint, llm.model, llm.batch);
             } else {
                 mapping = suggestHeuristically(snippets);
             }
@@ -196,14 +164,14 @@ public class SuggestCmd implements Runnable {
 
         // 1) 准备带 META 的片段（截断头/尾）
         List<String> blocks = snippets.stream()
-                .map(s -> formatSnippetBlockTruncated(s, headLines, tailLines))
+                .map(s -> formatSnippetBlockTruncated(s, codeLines, codeLines))
                 .toList();
 
         // 2) 统一 LLM 客户端；但分批并发在本类实现
         com.initialone.jhumanify.llm.LlmClient client =
                 new com.initialone.jhumanify.llm.OpenAiClient(apiKey, model, batchSize);
 
-        List<RenameSuggestion> items = callInBatches(client, blocks, tokenBudget, batch, maxConcurrent, retries);
+        List<RenameSuggestion> items = callInBatches(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent, retries);
 
         // 3) 结构化 -> Mapping
         Mapping raw = suggestionsToMapping(items, snippets);
@@ -229,11 +197,11 @@ public class SuggestCmd implements Runnable {
                 new com.initialone.jhumanify.llm.DeepSeekClient(apiKey, model, batchSize);
 
         List<String> blocks = snippets.stream()
-                .map(s -> formatSnippetBlockTruncated(s, headLines, tailLines))
+                .map(s -> formatSnippetBlockTruncated(s, codeLines, codeLines))
                 .toList();
 
         List<com.initialone.jhumanify.model.RenameSuggestion> items =
-                callInBatchesRaw(client, blocks, tokenBudget, batch, maxConcurrent, retries);
+                callInBatchesRaw(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent, retries);
 
         Mapping m0 = suggestionsToMapping(
                 items.stream().map(r -> {
@@ -253,14 +221,14 @@ public class SuggestCmd implements Runnable {
                                      String model,
                                      int batchSize) throws Exception {
         com.initialone.jhumanify.llm.LlmClient client =
-                new com.initialone.jhumanify.llm.LocalClient(localApi, endpoint, model, batchSize, timeoutSec);
+                new com.initialone.jhumanify.llm.LocalClient(localApi, endpoint, model, batchSize, llm.timeoutSec);
 
         List<String> blocks = snippets.stream()
-                .map(s -> formatSnippetBlockTruncated(s, headLines, tailLines))
+                .map(s -> formatSnippetBlockTruncated(s, codeLines, codeLines))
                 .toList();
 
         List<com.initialone.jhumanify.model.RenameSuggestion> items =
-                callInBatchesRaw(client, blocks, tokenBudget, batch, maxConcurrent, retries);
+                callInBatchesRaw(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent, retries);
 
         List<RenameSuggestion> items2 = items.stream().map(r -> {
             RenameSuggestion z = new RenameSuggestion();

@@ -59,8 +59,8 @@ public class OpenAiDocClient implements DocClient {
 
     private String callOnce(String code, String lang, String style) throws Exception {
         final String system = "zh".equalsIgnoreCase(lang)
-                ? "你是资深 Java 工程师。为给定 Java 代码生成 1-2 句 Javadoc 注释，不要杜撰外部行为。必要时简述副作用。只输出注释正文，不要包含 /** */ 符号。"
-                : "You are a senior Java engineer. Generate a 1–2 sentence Javadoc comment for the given Java code. Do not hallucinate external behavior. Mention side-effects if obvious. Output only the comment body, no /** */ markers.";
+                ? "请**严格使用简体中文**撰写.你是资深 Java 工程师。为给定 Java 代码生成 1-2 句 Javadoc 注释，不要杜撰外部行为。必要时简述副作用。只输出注释正文，不要包含 /** */ 符号。"
+                : "Write the Javadoc comment in **English only**.You are a senior Java engineer. Generate a 1–2 sentence Javadoc comment for the given Java code. Do not hallucinate external behavior. Mention side-effects if obvious. Output only the comment body, no /** */ markers.";
         final String user = "Style: " + (style == null ? "concise" : style)
                 + "\nCode:\n```java\n" + code + "\n```";
 

@@ -23,9 +23,9 @@ public class DocAnnotator {
 
     private final JavaParser parser;
     private final DocClient docClient; // can be RuleDocClient (offline) or LLM client
-    private final boolean overwrite;
     private final String lang;
     private final String style;
+    private final boolean overwrite;
 
     // ===== batching & parallel settings (read from System properties with sane defaults) =====
     private final int batchSize      = Math.max(1, parseIntProp("jhumanify.doc.batch",          12));
@@ -37,24 +37,31 @@ public class DocAnnotator {
     // 仅用于打印批次进度
     private final AtomicInteger globalSeq = new AtomicInteger(0);
 
+    public DocAnnotator(DocClient client, String lang, String style) {
+        this(client, /*overwrite*/ true, lang, style); // 默认覆盖
+    }
+
     public DocAnnotator(DocClient client, boolean overwrite, String lang, String style) {
         ParserConfiguration cfg = new ParserConfiguration();
         this.parser = new JavaParser(cfg);
-        this.docClient = client == null ? new RuleDocClient() : client;
-        this.overwrite = overwrite;
-        this.lang = lang == null ? "zh" : lang;
-        this.style = style == null ? "concise" : style;
+        this.docClient = (client == null) ? new RuleDocClient() : client;
+        this.overwrite = overwrite;                           // ← 新增
+        this.lang = (lang == null) ? "zh" : lang;
+        this.style = (style == null) ? "concise" : style;
     }
 
-    public void annotate(List<Path> sourceRoots) throws Exception {
+    private boolean needDoc(BodyDeclaration<?> bd) {
+        boolean has = bd.getComment().isPresent() && bd.getComment().get().isJavadocComment();
+        return overwrite || !has;
+    }
+
+    public void annotate(Path root) throws Exception {
         // 1) 收集 java 文件
         List<Path> javaFiles = new ArrayList<>();
-        for (Path root : sourceRoots) {
-            try {
-                Files.walk(root).filter(p -> p.toString().endsWith(".java")).forEach(javaFiles::add);
-            } catch (IOException ioe) {
-                System.err.println("[annotate] io " + root + " -> " + ioe.getMessage());
-            }
+        try {
+            Files.walk(root).filter(p -> p.toString().endsWith(".java")).forEach(javaFiles::add);
+        } catch (IOException ioe) {
+            System.err.println("[annotate] io " + root + " -> " + ioe.getMessage());
         }
         if (javaFiles.isEmpty()) return;
 
@@ -90,7 +97,8 @@ public class DocAnnotator {
         }
         if (workList.isEmpty()) {
             // 没有任何需要注释的节点
-            Formatter.formatJava(sourceRoots);
+
+            Formatter.formatJava(javaFiles);
             return;
         }
 
@@ -103,8 +111,8 @@ public class DocAnnotator {
         List<Future<Void>> futures = new ArrayList<>(totalBatches);
 
         System.out.printf(
-                "[annotate] concurrency cap = %d, batchSize = %d, totalBatches = %d%n",
-                llmConcurrent, batchSize, totalBatches);
+                "[annotate] blocks = %d, batches = %d%n",
+                workList.size(), totalBatches);
 
         for (List<WorkItem> batch : batches) {
             futures.add(es.submit(() -> {
@@ -169,15 +177,10 @@ public class DocAnnotator {
         }
 
         // 6) 统一格式化
-        Formatter.formatJava(sourceRoots);
+        Formatter.formatJava(javaFiles);
     }
 
     /* ================= helpers ================= */
-
-    private boolean needDoc(BodyDeclaration<?> bd) {
-        boolean has = bd.getComment().isPresent() && bd.getComment().get().isJavadocComment();
-        return overwrite || !has;
-    }
 
     private String snippetOfTruncated(BodyDeclaration<?> bd) {
         if (bd instanceof MethodDeclaration md) {

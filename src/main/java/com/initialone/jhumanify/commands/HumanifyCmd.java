@@ -1,5 +1,6 @@
 package com.initialone.jhumanify.commands;
 
+import com.initialone.jhumanify.llm.LlmOptions;
 import com.initialone.jhumanify.util.Formatter;
 import picocli.CommandLine;
 
@@ -19,10 +20,28 @@ import java.util.stream.Collectors;
  */
 @CommandLine.Command(
         name = "humanify",
-        description = "Run analyze -> suggest -> apply in one shot"
+        description = "humanify — one-shot pipeline\n" +
+                "Usage:\n" +
+                "  jhumanify humanify <SRC_DIR> <OUT_DIR> [options]\n" +
+                "\n" +
+                "Positional:\n" +
+                "  <SRC_DIR>          Decompiled Java source dir\n" +
+                "  <OUT_DIR>          Output dir\n" +
+                "\n" +
+                "Options (同 suggest/annotate + apply):\n" +
+                "  --provider STR          dummy | openai | local | deepseek (default: dummy)\n" +
+                "  --model STR             Model name (default: gpt-4o-mini)\n" +
+                "  --local-api STR         When --provider=local: openai | ollama (default: ollama)\n" +
+                "  --endpoint URL          Local endpoint (default: http://localhost:11434)\n" +
+                "  --batch INT             Max snippets per LLM batch (default: 12)\n" +
+                "  --max-concurrent INT    Max concurrent LLM calls (default: 100)\n" +
+                "\n" +
+                "Flow:\n" +
+                "  analyze → suggest → apply → annotate"
 )
 public class HumanifyCmd implements Runnable {
-
+    @CommandLine.Mixin
+    LlmOptions llm;
     /* 必选参数 */
     @CommandLine.Parameters(index = "0", description = "Input source dir")
     String srcDir;
@@ -30,54 +49,9 @@ public class HumanifyCmd implements Runnable {
     @CommandLine.Parameters(index = "1", description = "Output dir")
     String outDir;
 
-    /* 建议阶段参数（与 SuggestCmd 保持一致） */
-    @CommandLine.Option(names = "--provider", defaultValue = "dummy",
-            description = "dummy|openai|local|deepseek")
-    String provider;
-
-    @CommandLine.Option(names = "--model", defaultValue = "gpt-4o-mini",
-            description = "Model name (OpenAI/ollama)")
-    String model;
-
-    @CommandLine.Option(names = "--batch", defaultValue = "12",
-            description = "Max snippets per LLM batch")
-    int batch;
-
-    @CommandLine.Option(names = "--local-api", defaultValue = "ollama",
-            description = "When --provider=local: openai|ollama")
-    String localApi;
-
-    @CommandLine.Option(names = "--endpoint", defaultValue = "http://localhost:11434",
-            description = "Local endpoint. OpenAI-compat: http://localhost:1234/v1; Ollama: http://localhost:11434")
-    String endpoint;
-
-    /** 新增：统一的并发控制（同时在 suggest / annotate 传递），默认 100 */
-    @CommandLine.Option(
-            names = "--max-concurrent",
-            defaultValue = "100",
-            description = "Max concurrent LLM calls (applies to suggest & annotate)")
-    int maxConcurrent;
-
     /* 应用阶段参数（与 ApplyCmd 保持一致） */
     @CommandLine.Option(names = "--classpath", split = ":", description = "Extra classpath jars/dirs, separated by ':'")
     List<String> classpath = new ArrayList<>();
-
-    /* 中间产物控制 */
-    @CommandLine.Option(names = "--snippets", description = "Optional path to write snippets.json (default: <outDir>/snippets.json)")
-    String snippetsPathOpt;
-
-    @CommandLine.Option(names = "--mapping", description = "Optional path to write mapping.json (default: <outDir>/mapping.json)")
-    String mappingPathOpt;
-
-    @CommandLine.Option(names = "--keep-intermediate", defaultValue = "true",
-            negatable = true,
-            description = "Keep intermediate files (snippets.json, mapping.json). Default: ${DEFAULT-VALUE}")
-    boolean keepIntermediate;
-
-    @CommandLine.Option(names = "--format", defaultValue = "true",
-            negatable = true,
-            description = "Format the output Java files after apply. Default: ${DEFAULT-VALUE}")
-    boolean format;
 
     @CommandLine.Option(
             names = {"--lang"},
@@ -90,13 +64,6 @@ public class HumanifyCmd implements Runnable {
             defaultValue = "concise",
             description = "Javadoc style: concise|detailed (default: ${DEFAULT-VALUE})")
     String style;
-
-    @CommandLine.Option(
-            names = {"--overwrite"},
-            defaultValue = "false",
-            negatable = true,
-            description = "Overwrite existing Javadoc (default: ${DEFAULT-VALUE})")
-    boolean overwriteDocs;
 
     @Override
     public void run() {
@@ -111,8 +78,8 @@ public class HumanifyCmd implements Runnable {
             Files.createDirectories(out);
 
             // 1) 中间产物
-            Path snippets = (snippetsPathOpt != null) ? Paths.get(snippetsPathOpt) : out.resolve("snippets.json");
-            Path mapping  = (mappingPathOpt  != null) ? Paths.get(mappingPathOpt)  : out.resolve("mapping.json");
+            Path snippets = out.resolve("snippets.json");
+            Path mapping  = out.resolve("mapping.json");
             if (snippets.getParent() != null) Files.createDirectories(snippets.getParent());
             if (mapping.getParent()  != null) Files.createDirectories(mapping.getParent());
 
@@ -127,22 +94,22 @@ public class HumanifyCmd implements Runnable {
                 throw new IllegalStateException("snippets.json was not produced: " + snippets);
 
             /* ========== 2/4 suggest ========== */
-            System.out.println("[humanify] 2/4 suggest (" + provider + ")...");
+            System.out.println("[humanify] 2/4 suggest (" + llm.provider + ")...");
             List<String> suggestArgs = new ArrayList<>();
-            suggestArgs.addAll(List.of("--provider", provider));
-            suggestArgs.addAll(List.of("--model", model));
-            suggestArgs.addAll(List.of("--batch", Integer.toString(batch)));
+            suggestArgs.addAll(List.of("--provider", llm.provider));
+            suggestArgs.addAll(List.of("--model", llm.model));
+            suggestArgs.addAll(List.of("--batch", Integer.toString(llm.batch)));
 
             // 将并发参数传给 suggest（若 SuggestCmd 提供该字段）
             if (hasField(SuggestCmd.class, "maxConcurrent")) {
-                suggestArgs.addAll(List.of("--max-concurrent", Integer.toString(maxConcurrent)));
+                suggestArgs.addAll(List.of("--max-concurrent", Integer.toString(llm.maxConcurrent)));
             }
 
             if (hasField(SuggestCmd.class, "localApi")) {
-                suggestArgs.addAll(List.of("--local-api", localApi));
+                suggestArgs.addAll(List.of("--local-api", llm.localApi));
             }
             if (hasField(SuggestCmd.class, "endpoint")) {
-                suggestArgs.addAll(List.of("--endpoint", endpoint));
+                suggestArgs.addAll(List.of("--endpoint", llm.endpoint));
             }
 
             // 位置参数
@@ -175,21 +142,20 @@ public class HumanifyCmd implements Runnable {
             annArgs.add("--src");   annArgs.add(out.toString());
             annArgs.add("--lang");  annArgs.add(lang != null ? lang : "en");
             annArgs.add("--style"); annArgs.add(style != null ? style : "detailed");
-            if (overwriteDocs) annArgs.add("--overwrite");
-            annArgs.add("--provider"); annArgs.add(provider != null ? provider : "dummy");
-            annArgs.add("--model");    annArgs.add(model != null ? model : "gpt-4o-mini");
-            annArgs.add("--batch");    annArgs.add(Integer.toString(batch));
+            annArgs.add("--provider"); annArgs.add(llm.provider != null ? llm.provider : "dummy");
+            annArgs.add("--model");    annArgs.add(llm.model != null ? llm.model : "gpt-4o-mini");
+            annArgs.add("--batch");    annArgs.add(Integer.toString(llm.batch));
 
             // 将并发参数传给 annotate（AnnotateCmd 已支持）
             annArgs.add("--max-concurrent");
-            annArgs.add(Integer.toString(maxConcurrent));
+            annArgs.add(Integer.toString(llm.maxConcurrent));
 
-            if ("local".equalsIgnoreCase(provider)) {
-                annArgs.add("--local-api"); annArgs.add((localApi != null && !localApi.isEmpty()) ? localApi : "ollama");
-                if (endpoint != null && !endpoint.isEmpty()) { annArgs.add("--endpoint"); annArgs.add(endpoint); }
+            if ("local".equalsIgnoreCase(llm.provider)) {
+                annArgs.add("--local-api"); annArgs.add((llm.localApi != null && !llm.localApi.isEmpty()) ? llm.localApi : "ollama");
+                if (llm.endpoint != null && !llm.endpoint.isEmpty()) { annArgs.add("--endpoint"); annArgs.add(llm.endpoint); }
                 annArgs.add("--timeout-sec"); annArgs.add(Integer.toString(180));
             } else {
-                if (endpoint != null && !endpoint.isEmpty()) { annArgs.add("--endpoint"); annArgs.add(endpoint); }
+                if (llm.endpoint != null && !llm.endpoint.isEmpty()) { annArgs.add("--endpoint"); annArgs.add(llm.endpoint); }
                 annArgs.add("--timeout-sec"); annArgs.add(Integer.toString(180));
             }
 
@@ -197,23 +163,15 @@ public class HumanifyCmd implements Runnable {
             if (rc4 != 0) throw new IllegalStateException("annotate failed with code " + rc4);
 
             // 可选格式化
-            if (format) {
-                try {
-                    Formatter.formatTree(out);
-                    System.out.println("[humanify] formatted output.");
-                } catch (Throwable t) {
-                    System.err.println("[humanify] format skipped: " + t.getMessage());
-                }
+            try {
+                Formatter.formatTree(out);
+                System.out.println("[humanify] formatted output.");
+            } catch (Throwable t) {
+                System.err.println("[humanify] format skipped: " + t.getMessage());
             }
 
             long t1 = System.currentTimeMillis();
             System.out.printf("[humanify] done in %.2fs -> %s%n", (t1 - t0) / 1000.0, out);
-
-            // 自动清理中间产物（仅在未显式指定路径时，且 keepIntermediate=false）
-            if (!keepIntermediate) {
-                if (snippetsPathOpt == null) safeDelete(snippets);
-                if (mappingPathOpt  == null) safeDelete(mapping);
-            }
         } catch (Exception e) {
             e.printStackTrace();
             System.exit(2);
