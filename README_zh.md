@@ -95,19 +95,19 @@ analyze  →  suggest  →  apply  →  annotate
 ```bash
 # OpenAI
 export OPENAI_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify --provider openai --model gpt-4o-mini --lang zh samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider openai --model gpt-4o-mini samples/src samples/out
 ```
 
 ```bash
 # DeepSeek
 export DEEPSEEK_API_KEY=sk-xxxx
-java -jar target/java-humanify-*.jar humanify --provider deepseek --model deepseek-chat --lang zh samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider deepseek --model deepseek-chat samples/src samples/out
 ```
 
 ```bash
 # 本地（Ollama）
 # 确保模型已拉取：ollama run llama3.1:8b（或你喜欢的任意模型）
-java -jar target/java-humanify-*.jar humanify --provider local --local-api ollama --endpoint http://localhost:11434 --model llama3.1:8b --lang zh samples/src samples/out
+java -jar target/java-humanify-*.jar humanify --provider local --local-api ollama --endpoint http://localhost:11434 --model llama3.1:8b samples/src samples/out
 ```
 
 > `humanify` 执行：1) analyze → 2) suggest → 3) apply → 4) annotate  
