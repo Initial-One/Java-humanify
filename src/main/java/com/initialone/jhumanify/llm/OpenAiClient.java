@@ -11,24 +11,25 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
- * OkHttp 直连 OpenAI Chat Completions 的最小可用实现：
- * - 支持分批（batchSize 可调）
- * - JSON 严格解析为 RenameSuggestion[]
- * - 简单重试(429/5xx) + 指数退避 + 抖动
- * - 支持通过环境变量 OPENAI_BASE_URL 覆盖基地址（默认 https://api.openai.com）
+ * OpenAI / OpenAI 兼容 Chat Completions 客户端。
  *
- * 依赖：
- *   okhttp 4.12.x
- *   jackson-databind 2.17.x
+ * 特点:
+ * - 分批 (batchSize)
+ * - 严格把返回内容解析成 RenameSuggestion[]
+ * - 429 / 5xx 时指数退避重试
+ * - 可用 OPENAI_BASE_URL 覆盖默认基地址 (默认 https://api.openai.com)
  *
- * 配置示例：
- *   new OpenAiClient(System.getenv("OPENAI_API_KEY"), "gpt-4o-mini", 12)
+ * 此版本的改动:
+ * - 增加 sanitizeForJson(...)：把 APK 反编译代码里的不可打印控制字符过滤掉
+ *   (除了 \n \r \t 之外的 0x00~0x1F 都会被替换成空格)，防止请求体里出现原始 NUL 等导致网关返回 400。
+ * - 请求头增加 Accept / Accept-Encoding / Connection，和 DeepSeekClient 保持一致的健壮性。
  */
 public class OpenAiClient implements LlmClient {
-    private static final MediaType JSON = MediaType.parse("application/json");
+    private static final MediaType MEDIA_JSON = MediaType.parse("application/json");
 
     private final OkHttpClient http;
     private final ObjectMapper om = new ObjectMapper();
+
     private final String apiKey;
     private final String model;
     private final int batchSize;
@@ -40,6 +41,7 @@ public class OpenAiClient implements LlmClient {
         this.apiKey = apiKey;
         this.model = (model == null || model.isBlank()) ? "gpt-4o-mini" : model;
         this.batchSize = Math.max(1, batchSize);
+
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .writeTimeout(120, TimeUnit.SECONDS)
@@ -53,13 +55,25 @@ public class OpenAiClient implements LlmClient {
         List<RenameSuggestion> all = new ArrayList<>();
         for (int i = 0; i < snippets.size(); i += batchSize) {
             List<String> batch = snippets.subList(i, Math.min(i + batchSize, snippets.size()));
+
+            // 构造 prompt (包含 META header + Java 代码)
             String prompt = buildPrompt(batch);
+
+            // 调用 LLM，拿到这个 batch 的重命名建议
             List<RenameSuggestion> part = callChatCompletions(prompt);
-            if (part != null) all.addAll(part);
+            if (part != null) {
+                all.addAll(part);
+            }
         }
         return all;
     }
 
+    /**
+     * 构造发给模型的 prompt。
+     *
+     * 注意：这里我们还没 sanitize；我们会在真正发请求时调用 sanitizeForJson()，
+     * 这样不会破坏你后续调试/日志里看到的原始 prompt。
+     */
     private String buildPrompt(List<String> batch) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are a senior Java reverse-engineering assistant.\n")
@@ -83,26 +97,45 @@ public class OpenAiClient implements LlmClient {
         return sb.toString();
     }
 
-    /** 调用 Chat Completions；严格提取 choices[0].message.content 并反序列化为 RenameSuggestion[] */
+    /**
+     * 真正发起 Chat Completions 请求:
+     * - 用 Jackson 构建/序列化 JSON，确保引号、换行、安全转义都正确
+     * - 对 userPrompt 做 sanitizeForJson()，去掉不可打印控制字符，避免 400
+     */
     private List<RenameSuggestion> callChatCompletions(String userPrompt) throws Exception {
-        // messages: system + user
-        Map<String, Object> sysMsg = Map.of("role", "system", "content",
-                "You are an expert Java deobfuscation assistant.");
-        Map<String, Object> userMsg = Map.of("role", "user", "content", userPrompt);
+        // 消毒，防止控制字符 (0x00~0x1F) 直接进 JSON
+        String safeUserPrompt = sanitizeForJson(userPrompt);
+
+        Map<String, Object> sysMsg = Map.of(
+                "role", "system",
+                "content", "You are an expert Java deobfuscation assistant."
+        );
+
+        Map<String, Object> userMsg = Map.of(
+                "role", "user",
+                "content", safeUserPrompt
+        );
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", model);
         payload.put("messages", List.of(sysMsg, userMsg));
         payload.put("temperature", 0.2);
-        // 不强制 json_object，避免被包一层对象，交由提示词约束仅输出 JSON 数组
-        payload.put("max_tokens", 4096); // 防止长输出截断
+        // 不强制 response_format=json_object，因为不同模型/网关的支持度不完全一致；
+        // 我们让 prompt 约束 "Output ONLY the JSON array".
+        payload.put("max_tokens", 4096);
 
+        // Jackson 负责做所有必要的字符串转义
         String json = om.writeValueAsString(payload);
+
         Request req = new Request.Builder()
                 .url(chatUrl())
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
-                .post(RequestBody.create(json, JSON))
+                .header("Accept", "application/json")
+                // 下面两行是为了行为更稳定（很多代理/gateway在gzip+keepalive+chunked下会搞怪）
+                .header("Accept-Encoding", "identity")
+                .header("Connection", "close")
+                .post(RequestBody.create(json, MEDIA_JSON))
                 .build();
 
         int attempts = 0;
@@ -111,59 +144,124 @@ public class OpenAiClient implements LlmClient {
             try (Response resp = http.newCall(req).execute()) {
                 String body = resp.body() != null ? resp.body().string() : "";
                 if (!resp.isSuccessful()) {
-                    // 429/5xx 简单重试（指数退避 + 抖动）
+                    // 429 / 5xx 简单重试 (指数退避 + 抖动)
                     if ((resp.code() == 429 || resp.code() >= 500) && attempts < 3) {
-                        long backoff = (long) (500L * Math.pow(2, attempts - 1) + new Random().nextInt(250));
+                        long backoff = (long) (500L * Math.pow(2, attempts - 1)
+                                + new Random().nextInt(250));
                         Thread.sleep(backoff);
                         continue;
                     }
                     throw new RuntimeException("OpenAI HTTP " + resp.code() + ": " + safeTrim(body));
                 }
-                // 解析 choices[0].message.content
+
+                // 解析响应：choices[0].message.content
                 JsonNode root = om.readTree(body);
                 JsonNode choices = root.path("choices");
                 if (!choices.isArray() || choices.size() == 0) {
                     throw new RuntimeException("No choices in response");
                 }
-                String content = choices.get(0).path("message").path("content").asText("");
+                String content = choices.get(0)
+                        .path("message")
+                        .path("content")
+                        .asText("");
+
                 if (content.isEmpty()) {
                     throw new RuntimeException("Empty content in response");
                 }
-                // content 里应该是 JSON 数组；若模型偶尔包对象，也做容错
+
+                // content 应该是 JSON 数组；但有些模型偶尔会包对象或加解释文字
                 String cleaned = extractJson(content);
+
+                // 情况1: cleaned 是对象，可能长成 { "items":[ ... ] }
                 if (cleaned.startsWith("{")) {
                     JsonNode node = om.readTree(cleaned);
                     if (node.has("items") && node.get("items").isArray()) {
-                        return om.convertValue(node.get("items"),
-                                new TypeReference<List<RenameSuggestion>>() {});
+                        return om.convertValue(
+                                node.get("items"),
+                                new TypeReference<List<RenameSuggestion>>() {}
+                        );
                     }
                 }
-                return om.readValue(cleaned.getBytes(StandardCharsets.UTF_8),
-                        new TypeReference<List<RenameSuggestion>>() {});
+
+                // 情况2: cleaned 是数组本身
+                return om.readValue(
+                        cleaned.getBytes(StandardCharsets.UTF_8),
+                        new TypeReference<List<RenameSuggestion>>() {}
+                );
             }
         }
     }
 
-    /** 基地址可由环境变量 OPENAI_BASE_URL 覆盖（如 https://api.openai.com 或自建网关） */
+    /**
+     * 允许通过环境变量 OPENAI_BASE_URL 自定义基地址。
+     * 例如:
+     *   export OPENAI_BASE_URL=https://your-gateway.example.com
+     * 会请求:
+     *   $OPENAI_BASE_URL/v1/chat/completions
+     *
+     * 默认是 https://api.openai.com
+     */
     private static String chatUrl() {
         String base = System.getenv("OPENAI_BASE_URL");
-        if (base == null || base.isBlank()) base = "https://api.openai.com";
-        // 去掉可能的末尾斜杠
-        if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        if (base == null || base.isBlank()) {
+            base = "https://api.openai.com";
+        }
+        // 去掉尾部斜杠，避免双斜杠
+        if (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
         return base + "/v1/chat/completions";
     }
 
-    /** 从 content 中取最外层 JSON（容错去掉模型偶尔加的说明文字） */
+    /**
+     * 从 LLM 返回的 content 里提取最外层 JSON:
+     * - 优先找数组 [...]，否则找对象 {...}。
+     * - 如果模型加了前后废话，这里会把废话剥掉。
+     */
     private static String extractJson(String s) {
-        int i = s.indexOf('['), j = s.lastIndexOf(']');
-        if (i >= 0 && j > i) return s.substring(i, j + 1);
-        int k1 = s.indexOf('{'), k2 = s.lastIndexOf('}');
-        if (k1 >= 0 && k2 > k1) return s.substring(k1, k2 + 1);
+        int i = s.indexOf('[');
+        int j = s.lastIndexOf(']');
+        if (i >= 0 && j > i) {
+            return s.substring(i, j + 1);
+        }
+
+        int k1 = s.indexOf('{');
+        int k2 = s.lastIndexOf('}');
+        if (k1 >= 0 && k2 > k1) {
+            return s.substring(k1, k2 + 1);
+        }
+        // fallback：尽量别返回空字符串，至少 trim 一下
         return s.trim();
     }
 
+    /**
+     * 只为了在报错时别打太长：去掉多余空白并截断。
+     */
     private static String safeTrim(String s) {
-        s = s == null ? "" : s.replaceAll("\\s+", " ");
+        s = (s == null ? "" : s.replaceAll("\\s+", " "));
         return s.length() > 300 ? s.substring(0, 300) + "..." : s;
+    }
+
+    /**
+     * 把 prompt 里的 NUL、0x01 等奇怪控制字符清掉，防止下游 API 认为 JSON 非法。
+     * - 保留 \n \r \t，因为这些是我们想传给模型的格式信息
+     * - 其他 <0x20 的字符替换成空格
+     *
+     * 这样即使 APK 反编译代码里有那些不可见垃圾字符，也不会直接把它们塞进 JSON。
+     */
+    private static String sanitizeForJson(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int idx = 0; idx < s.length(); idx++) {
+            char c = s.charAt(idx);
+            if (c == '\n' || c == '\r' || c == '\t') {
+                sb.append(c);
+            } else if (c < 0x20) {
+                sb.append(' ');
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 }

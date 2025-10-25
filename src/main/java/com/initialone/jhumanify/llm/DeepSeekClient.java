@@ -8,20 +8,37 @@ import okhttp3.*;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 
 /**
  * DeepSeek Chat Completions 客户端（OpenAI 兼容）。
- * 约定：返回 JSON 形如：
- * {"renames":[{"kind":"class","old":"Foo","new":"Adder"}, {"kind":"method","old":"b","new":"add"}, {"kind":"field","old":"a","new":"base"}, {"kind":"var","old":"x","new":"value"}]}
- * 也兼容：直接返回数组 [{...},{...}]。
+ *
+ * 约定：LLM 返回 JSON 形如：
+ * {
+ *   "renames":[
+ *     {"kind":"class","old":"Foo","new":"Adder"},
+ *     {"kind":"method","old":"b","new":"add"},
+ *     {"kind":"field","old":"a","new":"base"},
+ *     {"kind":"var","old":"x","new":"value"}
+ *   ]
+ * }
+ *
+ * 也兼容直接返回数组：
+ * [
+ *   {"kind":"class","old":"Foo","new":"Adder"},
+ *   ...
+ * ]
+ *
+ * 重要修改：
+ * - 不再手工拼接 JSON 字符串，而是用 ObjectMapper 序列化，避免非法字符导致 400。
+ * - 在发给 DeepSeek 前会对 prompt 做 sanitize，过滤掉 0x00~0x1F 中除了 \n\r\t 的控制字符。
  */
 public class DeepSeekClient implements LlmClient {
 
+    private static final MediaType MEDIA_JSON = MediaType.parse("application/json");
+
     private final OkHttpClient http;
-    private final ObjectMapper om = new ObjectMapper();
+    private final ObjectMapper om = new ObjectMapper(); // 用于解析 DeepSeek 回复 & 构建请求
 
     private final String apiKey;
     private final String model;
@@ -35,6 +52,7 @@ public class DeepSeekClient implements LlmClient {
     public DeepSeekClient(String apiKey, String model, String baseUrl, int batchSize, int timeoutSec) {
         this.apiKey = apiKey;
         this.model = model;
+
         // 统一补上 /v1
         String b = (baseUrl == null || baseUrl.isBlank()) ? "https://api.deepseek.com" : baseUrl;
         b = b.endsWith("/") ? b.substring(0, b.length() - 1) : b;
@@ -42,13 +60,14 @@ public class DeepSeekClient implements LlmClient {
         this.baseUrl = b;
 
         this.batchSize = Math.max(1, batchSize);
+
         this.http = new OkHttpClient.Builder()
                 .retryOnConnectionFailure(true)
                 .connectTimeout(Duration.ofSeconds(20))
                 .readTimeout(Duration.ofSeconds(timeoutSec))
                 .writeTimeout(Duration.ofSeconds(timeoutSec))
                 .callTimeout(Duration.ofSeconds(timeoutSec + 30))
-                // 优先 HTTP/2（避免 chunked），回退到 HTTP/1.1
+                // 优先 HTTP/2（避免某些 chunked 边缘问题），回退到 HTTP/1.1
                 .protocols(Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1))
                 .build();
     }
@@ -59,11 +78,17 @@ public class DeepSeekClient implements LlmClient {
         for (int i = 0; i < snippetBlocks.size(); i += batchSize) {
             int to = Math.min(i + batchSize, snippetBlocks.size());
             List<String> group = snippetBlocks.subList(i, to);
+
+            // 构造大 prompt
             String prompt = buildPrompt(group);
 
+            // 调 DeepSeek
             String body = callDeepSeek(prompt);
+
+            // 提取 DeepSeek 返回的 message.content
             String content = extractMessageContent(body);
 
+            // 再从 content 中解析我们约定的 JSON（renames 列表）
             JsonNode root = tryParseJson(content);
             if (root == null) continue;
 
@@ -72,37 +97,51 @@ public class DeepSeekClient implements LlmClient {
             } else if (root.isArray()) {
                 appendRenames(out, root);
             } else {
-                // ignore
+                // ignore silently
             }
         }
         return out;
     }
 
-    /* ------------------------ HTTP ------------------------ */
+    /* =========================================================
+     *                     HTTP 调用部分
+     * ========================================================= */
 
     private String callDeepSeek(String prompt) throws Exception {
         String url = baseUrl + "/chat/completions";
-        String payload = """
-        {
-          "model": %s,
-          "messages": [
-            {"role":"system","content":"You are an expert Java deobfuscation assistant. Return ONLY JSON as specified."},
-            {"role":"user","content": %s}
-          ],
-          "temperature": 0.2,
-          "stream": false
-        }
-        """.formatted(jsonQuote(model), jsonQuote(prompt));
+
+        // 过滤控制字符，避免 DeepSeek 直接报 400
+        String safeUserContent = sanitizeForJson(prompt);
+
+        // 我们构造一个符合 OpenAI Chat Completions 风格的请求体
+        ChatRequest reqPayload = new ChatRequest();
+        reqPayload.model = model;
+        reqPayload.temperature = 0.2;
+        reqPayload.stream = false;
+        reqPayload.messages = List.of(
+                new ChatMessage(
+                        "system",
+                        "You are an expert Java deobfuscation assistant. " +
+                                "Return ONLY JSON as specified."
+                ),
+                new ChatMessage(
+                        "user",
+                        safeUserContent
+                )
+        );
+
+        // 用 Jackson 序列化成合法 JSON
+        String payloadJson = om.writeValueAsString(reqPayload);
 
         Request req = new Request.Builder()
                 .url(url)
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
-                // 关键：避免 gzip+chunked 的边缘坑 & 避免复用陈旧连接
+                // 避免 gzip + chunked 的奇怪组合，加上 Connection: close 也能避免复用脏连接
                 .header("Accept-Encoding", "identity")
                 .header("Connection", "close")
-                .post(RequestBody.create(payload, MediaType.parse("application/json")))
+                .post(RequestBody.create(payloadJson, MEDIA_JSON))
                 .build();
 
         try (Response resp = http.newCall(req).execute()) {
@@ -114,8 +153,10 @@ public class DeepSeekClient implements LlmClient {
                         " body=" + err);
             }
             ResponseBody rb = resp.body();
-            if (rb == null) throw new IllegalStateException("Empty body");
-            byte[] bytes = rb.bytes(); // 不用 string()，避开 BOM/charset 额外路径
+            if (rb == null) {
+                throw new IllegalStateException("Empty body");
+            }
+            byte[] bytes = rb.bytes(); // 避免 OkHttp 的 string() 做 charset 魔改
             MediaType mt = rb.contentType();
             Charset cs = (mt != null && mt.charset() != null) ? mt.charset() : StandardCharsets.UTF_8;
             return new String(bytes, cs);
@@ -132,12 +173,30 @@ public class DeepSeekClient implements LlmClient {
         }
     }
 
-    private static String jsonQuote(String s) {
-        String esc = s.replace("\\","\\\\").replace("\"","\\\"").replace("\n","\\n");
-        return "\"" + esc + "\"";
+    /**
+     * 把 prompt 里的“非法控制字符”清理掉，避免 JSON 无法解析。
+     * - 保留 \n\r\t（这些我们希望留给 LLM，用来保持代码格式）
+     * - 其他 <0x20 的字符，用空格代替
+     */
+    private static String sanitizeForJson(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\n' || c == '\r' || c == '\t') {
+                sb.append(c);
+            } else if (c < 0x20) {
+                sb.append(' ');
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
-    /* ------------------------ Prompt ------------------------ */
+    /* =========================================================
+     *                     Prompt 构造
+     * ========================================================= */
 
     private String buildPrompt(List<String> group) {
         StringBuilder sb = new StringBuilder();
@@ -164,8 +223,23 @@ public class DeepSeekClient implements LlmClient {
         return sb.toString();
     }
 
-    /* ------------------------ Parse ------------------------ */
+    /* =========================================================
+     *                   DeepSeek 回复解析
+     * ========================================================= */
 
+    /**
+     * DeepSeek 返回的是 OpenAI-style：
+     * {
+     *   "choices": [
+     *     {
+     *       "message": {
+     *         "role": "...",
+     *         "content": "..."   <-- 我们关心这个
+     *       }
+     *     }
+     *   ]
+     * }
+     */
     private String extractMessageContent(String body) {
         try {
             JsonNode root = om.readTree(body);
@@ -173,34 +247,53 @@ public class DeepSeekClient implements LlmClient {
             if (node.isMissingNode() || node.isNull()) return body;
             return node.asText();
         } catch (Exception e) {
-            // 退化：body 里直接找 "content":"..."
+            // fallback: 旧的手工提取方式
             int i = body.lastIndexOf("\"content\":\"");
             if (i < 0) return body;
             StringBuilder sb = new StringBuilder();
             boolean esc = false;
             for (int idx = i + 11; idx < body.length(); idx++) {
                 char c = body.charAt(idx);
-                if (esc) { sb.append(c == 'n' ? '\n' : (c == 't' ? '\t' : c)); esc = false; continue; }
-                if (c == '\\') { esc = true; continue; }
-                if (c == '"') { break; }
+                if (esc) {
+                    if (c == 'n') { sb.append('\n'); }
+                    else if (c == 't') { sb.append('\t'); }
+                    else { sb.append(c); }
+                    esc = false;
+                    continue;
+                }
+                if (c == '\\') {
+                    esc = true;
+                    continue;
+                }
+                if (c == '"') {
+                    break;
+                }
                 sb.append(c);
             }
             return sb.toString();
         }
     }
 
+    /**
+     * 尝试把 LLM 的 content 解析成 JSON：
+     * - 去掉 ```json ... ``` 包裹
+     * - 找到第一个 { 或 [
+     * - 用 Jackson 读成树
+     */
     private JsonNode tryParseJson(String content) {
-        // 去掉 ```json ... ``` 包裹
         String cleaned = content;
         int fence = cleaned.indexOf("```");
         if (fence >= 0) {
             int fence2 = cleaned.indexOf("```", fence + 3);
-            if (fence2 > fence) cleaned = cleaned.substring(fence + 3, fence2);
+            if (fence2 > fence) {
+                cleaned = cleaned.substring(fence + 3, fence2);
+            }
         }
-        // 截取最外层 {} 或 []
+
         cleaned = cleaned.trim();
         int stObj = cleaned.indexOf('{');
         int stArr = cleaned.indexOf('[');
+
         try {
             if (stArr >= 0 && (stObj < 0 || stArr < stObj)) {
                 // 以数组开头
@@ -215,6 +308,9 @@ public class DeepSeekClient implements LlmClient {
         }
     }
 
+    /**
+     * 把 LLM 返回的 renames 数组转成 RenameSuggestion 列表
+     */
     private void appendRenames(List<RenameSuggestion> out, JsonNode arr) {
         if (arr == null || !arr.isArray()) return;
         for (JsonNode n : arr) {
@@ -235,8 +331,37 @@ public class DeepSeekClient implements LlmClient {
     private static String pickText(JsonNode obj, String... keys) {
         for (String k : keys) {
             JsonNode v = obj.get(k);
-            if (v != null && v.isValueNode()) return v.asText();
+            if (v != null && v.isValueNode()) {
+                return v.asText();
+            }
         }
         return null;
+    }
+
+    /* =========================================================
+     *                    内部小模型类
+     * ========================================================= */
+
+    /**
+     * Chat Completions 风格的 message
+     */
+    public static class ChatMessage {
+        public String role;
+        public String content;
+        public ChatMessage() {}
+        public ChatMessage(String role, String content) {
+            this.role = role;
+            this.content = content;
+        }
+    }
+
+    /**
+     * 发给 DeepSeek 的请求体
+     */
+    public static class ChatRequest {
+        public String model;
+        public List<ChatMessage> messages;
+        public double temperature;
+        public boolean stream;
     }
 }

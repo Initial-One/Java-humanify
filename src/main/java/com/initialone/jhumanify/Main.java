@@ -5,7 +5,7 @@ import picocli.CommandLine;
 
 @CommandLine.Command(
         name = "jhumanify",
-        version = "0.3.1",
+        version = "0.4.0",
         mixinStandardHelpOptions = true,
         usageHelpAutoWidth = true,
         sortOptions = false,
@@ -18,7 +18,7 @@ import picocli.CommandLine;
                 "Env: OPENAI_API_KEY / OPENAI_BASE_URL / DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL"
         },
         subcommands = {
-                DecompileCmd.class, AnalyzeCmd.class, SuggestCmd.class,
+                HumanifyApkCmd.class,DecompileCmd.class, AnalyzeCmd.class, SuggestCmd.class,
                 ApplyCmd.class, HumanifyCmd.class, AnnotateCmd.class
         }
 )
