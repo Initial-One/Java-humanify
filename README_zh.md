@@ -27,34 +27,34 @@ package demo.mix;
  */
 public final class HashCalculator {
 
-    private static final int[] O = { 0, 1, 1, 2 };
+  private static final int[] O = { 0, 1, 1, 2 };
 
-    /**
-     * 私有构造器，防止实例化该工具类。
-     */
-    private HashCalculator() {}
+  /**
+   * 私有构造器，防止实例化该工具类。
+   */
+  private HashCalculator() {}
 
-    /**
-     * 基于 FNV-1a 并混入额外状态，计算输入字符串的 32 位哈希值。
-     *
-     * @param inputString 参数
-     * @return 返回值
-     */
-    public static int calculateHash(String inputString) {
-        long storedValue = 0x811c9dc5L;
-        if (inputString == null) return 0;
-        int index = 0, stringLength = inputString.length(), hashState = O[2];
-        while (index < stringLength) {
-            char currentChar = inputString.charAt(index++);
-            storedValue ^= currentChar;
-            storedValue *= 0x01000193L;
-            storedValue &= 0xffffffffL;
-            hashState ^= (currentChar << 1);
-            hashState ^= hashState >>> 7;
-            if ((index & 3) == 0) storedValue ^= (hashState & 0xff);
-        }
-        return (int) storedValue;
+  /**
+   * 基于 FNV-1a 并混入额外状态，计算输入字符串的 32 位哈希值。
+   *
+   * @param inputString 参数
+   * @return 返回值
+   */
+  public static int calculateHash(String inputString) {
+    long storedValue = 0x811c9dc5L;
+    if (inputString == null) return 0;
+    int index = 0, stringLength = inputString.length(), hashState = O[2];
+    while (index < stringLength) {
+      char currentChar = inputString.charAt(index++);
+      storedValue ^= currentChar;
+      storedValue *= 0x01000193L;
+      storedValue &= 0xffffffffL;
+      hashState ^= (currentChar << 1);
+      hashState ^= hashState >>> 7;
+      if ((index & 3) == 0) storedValue ^= (hashState & 0xff);
     }
+    return (int) storedValue;
+  }
 }
 ```
 
@@ -66,10 +66,11 @@ LLM **不会**触碰你的代码结构。
 ## 主要特性
 
 - **可插拔 LLM**：OpenAI / DeepSeek / 本地（Ollama、OpenAI 兼容端点）。
-- **自动 Javadoc（annotate）**：支持类、枚举、record、构造器、方法；自动生成 `@param/@return/@throws`。  
+- **自动 Javadoc（annotate）**：支持类、枚举、record、构造器、方法；自动生成 `@param/@return/@throws`。
   - 可选 **离线启发式（dummy）**：无需 API Key，零成本，但质量不及 LLM。
 - **签名级安全重命名**：以 classFqn / methodSig / fieldFqn 为核心，AST 落地，构造器/导入/文件名协同更新。
 - **可控成本与吞吐**：批量（batch）+ 并发（max-concurrent）+ 片段截断（head/tail/maxBodyLen）。
+- **一键 APK 反混淆（`humanify-apk`）**：直接输入 `.apk`，自动调用内置的 apktool/jadx 还原 Java 源码，再整体重命名、加中文注释、排版美化，最终输出可读源码；无需你手动安装这些工具。
 
 ---
 
@@ -85,13 +86,15 @@ analyze  →  suggest  →  apply  →  annotate
 - **apply**：AST 级应用映射，保证语义/引用一致，输出到新目录。
 - **annotate**：生成/覆盖 Javadoc（支持 `--lang zh|en`、`--style concise|detailed`）。
 
-> 推荐使用一条龙命令 `humanify`，内部按顺序执行以上四步。
+> 推荐使用一条龙命令 `humanify`，会按上述四步依次运行并产出“人类可读版源码”。  
+> 新增的一条龙命令 `humanify-apk` 会先自动反编译 APK，再跑完整流程，直接给你去混淆+带注释的 Java 源码目录。
 
 ---
 
 ## 快速开始
 
 ### 一条龙（推荐）
+
 ```bash
 # OpenAI
 export OPENAI_API_KEY=sk-xxxx
@@ -110,7 +113,16 @@ java -jar target/java-humanify-*.jar humanify --provider deepseek --model deepse
 java -jar target/java-humanify-*.jar humanify --provider local --local-api ollama --endpoint http://localhost:11434 --model llama3.1:8b samples/src samples/out
 ```
 
-> `humanify` 执行：1) analyze → 2) suggest → 3) apply → 4) annotate  
+```bash
+# APK 模式（humanify-apk）
+# 输入: myapp.apk
+# 输出: ./out-decoded 目录，里面是已去混淆、已重命名、已加注释的 Java 源码
+export OPENAI_API_KEY=sk-xxxx   # 或 DEEPSEEK_API_KEY，或使用 --provider local
+java -jar target/java-humanify-*.jar humanify-apk --provider openai --model gpt-4o-mini myapp.apk out-decoded
+```
+
+> `humanify` 执行顺序：1) analyze → 2) suggest → 3) apply → 4) annotate  
+> `humanify-apk` 执行顺序：反编译 APK → analyze → suggest → apply → annotate  
 > `--lang/--style/--overwrite` 影响 **annotate** 阶段。`--provider dummy` 为离线启发式。
 
 ---
@@ -142,9 +154,15 @@ java -jar target/java-humanify-*.jar humanify --provider local --local-api ollam
 ## CLI 速查
 
 ```bash
-java -jar java-humanify.jar analyze  <srcDir> <snippets.json> [opts]
-java -jar java-humanify.jar suggest  <snippets.json> <mapping.json> [opts]
-java -jar java-humanify.jar apply    <srcDir> <mapping.json> <outDir> [--classpath ...]
-java -jar java-humanify.jar annotate --src <dir[,dir2,...]> [--lang/--style/--overwrite ...]
-java -jar java-humanify.jar humanify <srcDir> <outDir> [provider/model/annotate opts...]
+java -jar java-humanify.jar analyze       <srcDir> <snippets.json> [opts]
+java -jar java-humanify.jar suggest       <snippets.json> <mapping.json> [opts]
+java -jar java-humanify.jar apply         <srcDir> <mapping.json> <outDir> [--classpath ...]
+java -jar java-humanify.jar annotate      --src <dir[,dir2,...]> [--lang/--style/--overwrite ...]
+java -jar java-humanify.jar humanify      <srcDir> <outDir> [provider/model/annotate opts...]
+java -jar java-humanify.jar humanify-apk  <apkFile.apk> <outDir> [provider/model/annotate opts...]
 ```
+
+`humanify-apk` 会：
+- 自动解包 / 反编译 APK（apktool + jadx，工具已经内置）
+- 自动执行重命名 / 注释生成
+- 输出可读、带中文注释的 Java 源码到 `<outDir>`，你无需手动安装任何额外反编译工具。

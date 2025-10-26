@@ -2,7 +2,7 @@
 [![English](https://img.shields.io/badge/README-English-blue)](./README.md)
 [![简体中文](https://img.shields.io/badge/README-简体中文-brightgreen)](./README_zh.md)
 
-[//]: # ([![WeChat]&#40;https://img.shields.io/badge/WeChat-Add-07C160?logo=wechat&logoColor=white&#41;]&#40;./assets/wechat-qr.jpg&#41;)
+[//]: # ([![WeChat](https://img.shields.io/badge/WeChat-Add-07C160?logo=wechat&logoColor=white)](./assets/wechat-qr.jpg))
 > Humanize decompiled/obfuscated Java code with LLMs (OpenAI, DeepSeek, Ollama, etc.): better names + automatic Javadoc.
 
 Java Humanify uses LLMs to generate more readable names for **classes / methods / fields / local variables**, and can automatically create Javadoc for **classes / constructors / methods**.  
@@ -67,10 +67,11 @@ They only propose names / comments. Renaming is applied on the AST with symbol r
 ## Key Features
 
 - **Pluggable LLMs**: OpenAI / DeepSeek / Local (Ollama, OpenAI-compatible endpoints).
-- **Automatic Javadoc (`annotate`)**: supports classes, enums, records, constructors, and methods; auto-generates `@param/@return/@throws`.  
+- **Automatic Javadoc (`annotate`)**: supports classes, enums, records, constructors, and methods; auto-generates `@param/@return/@throws`.
   - Optional **offline heuristics (`dummy`)**: zero cost and no API key, but lower quality than LLMs.
 - **Signature-safe renames**: centered on classFqn / methodSig / fieldFqn; applied at the AST level; constructors/imports/file names updated accordingly.
 - **Controllable cost & throughput**: batching (`--batch`) + concurrency (`--max-concurrent`) + snippet truncation (`--head/--tail/--maxBodyLen`).
+- **`humanify-apk` one-shot APK flow**: give it an `.apk`, it will internally decode (apktool/jadx), deobfuscate/rename code, generate readable Javadoc, and output human-readable Java source — no extra tools to install.
 
 ---
 
@@ -86,7 +87,8 @@ analyze  →  suggest  →  apply  →  annotate
 - **apply**: applies the mapping at the AST level, preserving semantics/references and writing to a new directory.
 - **annotate**: generates/overwrites Javadoc (supports `--lang zh|en`, `--style concise|detailed`).
 
-> The one-shot command `humanify` runs these four steps in order.
+> The one-shot command `humanify` runs these four steps in order on an existing source tree.  
+> The one-shot command `humanify-apk` first decompiles an APK into Java source, then runs the full pipeline automatically and gives you cleaned, renamed, documented code.
 
 ---
 
@@ -112,15 +114,24 @@ java -jar target/java-humanify-*.jar humanify --provider deepseek --model deepse
 java -jar target/java-humanify-*.jar humanify --provider local --local-api ollama --endpoint http://localhost:11434 --model llama3.1:8b samples/src samples/out
 ```
 
+```bash
+# APK mode (humanify-apk)
+# Input: myapp.apk
+# Output: ./out-decoded containing deobfuscated, renamed, documented Java source
+export OPENAI_API_KEY=sk-xxxx   # or DEEPSEEK_API_KEY, or use --provider local
+java -jar target/java-humanify-*.jar humanify-apk --provider openai --model gpt-4o-mini myapp.apk out-decoded
+```
+
 > Execution order of `humanify`: 1) analyze → 2) suggest → 3) apply → 4) annotate  
+> Execution order of `humanify-apk`: decode APK → analyze → suggest → apply → annotate  
 > `--lang/--style/--overwrite` affect the **annotate** phase. `--provider dummy` uses offline heuristics.
 
 ---
 
 ## Providers & Environment Variables
 
-- **OpenAI**: `OPENAI_API_KEY` (required).  
-- **DeepSeek**: `DEEPSEEK_API_KEY` (required).  
+- **OpenAI**: `OPENAI_API_KEY` (required).
+- **DeepSeek**: `DEEPSEEK_API_KEY` (required).
 - **Local**: `--provider local` + `--local-api openai|ollama` + `--endpoint http://host:port`.
 
 > To produce Chinese Javadoc, **explicitly** set `--lang zh` and use one of `openai|deepseek|local`.
@@ -144,9 +155,15 @@ Licensed under **Apache-2.0**. See [LICENSE](./LICENSE).
 ## CLI Cheatsheet
 
 ```bash
-java -jar java-humanify.jar analyze  <srcDir> <snippets.json> [opts]
-java -jar java-humanify.jar suggest  <snippets.json> <mapping.json> [opts]
-java -jar java-humanify.jar apply    <srcDir> <mapping.json> <outDir> [--classpath ...]
-java -jar java-humanify.jar annotate --src <dir[,dir2,...]> [--lang/--style/--overwrite ...]
-java -jar java-humanify.jar humanify <srcDir> <outDir> [provider/model/annotate opts...]
+java -jar java-humanify.jar analyze       <srcDir> <snippets.json> [opts]
+java -jar java-humanify.jar suggest       <snippets.json> <mapping.json> [opts]
+java -jar java-humanify.jar apply         <srcDir> <mapping.json> <outDir> [--classpath ...]
+java -jar java-humanify.jar annotate      --src <dir[,dir2,...]> [--lang/--style/--overwrite ...]
+java -jar java-humanify.jar humanify      <srcDir> <outDir> [provider/model/annotate opts...]
+java -jar java-humanify.jar humanify-apk  <apkFile.apk> <outDir> [provider/model/annotate opts...]
 ```
+
+The `humanify-apk` command will:
+- unpack / decompile the APK (apktool + jadx)
+- run the full rename / Javadoc pipeline
+- write cleaned, human-readable Java code to `<outDir>` without requiring you to manually install those tools.
