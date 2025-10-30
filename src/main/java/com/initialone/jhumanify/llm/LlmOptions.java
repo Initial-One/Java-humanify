@@ -17,9 +17,12 @@ public class LlmOptions {
             description = "When --provider=local: openai | ollama")
     public String localApi;
 
-    @CommandLine.Option(names="--endpoint", defaultValue="http://localhost:11434",
-            description = "Local endpoint (OpenAI-compat or Ollama)")
-    public String endpoint;
+    @CommandLine.Option(
+            names = "--endpoint",
+            description = "Override base URL, OpenAI-compatible API. " +
+                    "e.g., https://api.openai.com or http://localhost:11434"
+    )
+    public String endpoint; // 不给 defaultValue，保持 null
 
     @CommandLine.Option(names="--timeout-sec", defaultValue="180",
             description = "HTTP read/call timeout seconds for local provider")

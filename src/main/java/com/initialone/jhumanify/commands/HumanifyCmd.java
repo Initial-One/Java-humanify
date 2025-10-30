@@ -9,21 +9,14 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 一条命令串行执行：analyze -> suggest -> apply -> annotate -> format
+ * 一条命令串行执行：analyze -> suggest -> apply -> package-refactor? -> annotate -> format
  *
  * 用法：
  *   java -jar jhumanify.jar humanify \
- *     --provider local --local-api ollama --endpoint http://localhost:11434 \
+ *     --provider local --local-api openai --endpoint http://localhost:8080/v1 \
  *     --model qwen2.5:1.5b \
  *     --max-concurrent 100 \
  *     samples/src samples/out-humanified
- *
- * 流程：
- *   1. analyze     扫描源码、提取片段 (snippets.json)
- *   2. suggest     调 LLM 生成重命名建议 (mapping.json)
- *   3. apply       把 mapping 应用到源码，输出到 OUT_DIR
- *   4. annotate    生成类/方法/字段的 Javadoc 注释（分批，避免 OOM）
- *   5. format      进行 google-java-format 排版（由 Formatter fork 子进程并自动加 --add-exports）
  */
 @CommandLine.Command(
         name = "humanify",
@@ -45,9 +38,13 @@ import java.util.stream.Collectors;
                 "  --lang STR              zh|en (Javadoc language)\n" +
                 "  --style STR             concise|detailed (Javadoc style)\n" +
                 "  --classpath CP          ':'-separated classpath for apply\n" +
+                "  --rename-packages       Rename obfuscated package/folder names via LLM/heuristic\n" +
+                "  --package-rename-mode M llm|heuristic (default: llm)\n" +
+                "  --package-rename-skip R Regex to skip packages (e.g. ^(androidx?|com\\.google|org)\\b)\n" +
+                "  --package-rename-leaf-only  Rename only the leaf segment (default: true)\n" +
                 "\n" +
                 "Flow:\n" +
-                "  analyze → suggest → apply → annotate → format"
+                "  analyze → suggest → apply → package-refactor? → annotate → format"
 )
 public class HumanifyCmd implements Runnable {
     @CommandLine.Mixin
@@ -101,6 +98,23 @@ public class HumanifyCmd implements Runnable {
     )
     boolean annotateKeepTemp = false;
 
+    /* === 新增：包/目录语义化重命名相关 === */
+    @CommandLine.Option(names="--rename-packages", defaultValue = "false",
+            description = "Rename obfuscated package/folder names via LLM/heuristic")
+    boolean renamePackages;
+
+    @CommandLine.Option(names="--package-rename-mode", defaultValue = "llm",
+            description = "llm|heuristic (default: ${DEFAULT-VALUE})")
+    String packageRenameMode;
+
+    @CommandLine.Option(names="--package-rename-skip",
+            description = "Regex to skip packages (e.g. ^(androidx?|com\\.google|org)\\b)")
+    String packageRenameSkip;
+
+    @CommandLine.Option(names="--package-rename-leaf-only", defaultValue = "true",
+            description = "Only rename the leaf segment of the package path (default: ${DEFAULT-VALUE})")
+    boolean packageRenameLeafOnly;
+
     @Override
     public void run() {
         Path src = Paths.get(srcDir);
@@ -126,17 +140,11 @@ public class HumanifyCmd implements Runnable {
 
             /* ========== 1/5 analyze ========== */
             System.out.println("[humanify] 1/5 analyze...");
-            List<String> analyzeArgs = List.of(
-                    src.toString(),
-                    snippets.toString()
-            );
+            List<String> analyzeArgs = List.of(src.toString(), snippets.toString());
             int rc1 = new CommandLine(new AnalyzeCmd()).execute(analyzeArgs.toArray(new String[0]));
-            if (rc1 != 0) {
-                throw new IllegalStateException("analyze failed with code " + rc1);
-            }
-            if (!Files.exists(snippets) || Files.size(snippets) == 0) {
+            if (rc1 != 0) throw new IllegalStateException("analyze failed with code " + rc1);
+            if (!Files.exists(snippets) || Files.size(snippets) == 0)
                 throw new IllegalStateException("snippets.json was not produced: " + snippets);
-            }
 
             /* ========== 2/5 suggest ========== */
             System.out.println("[humanify] 2/5 suggest (" + llm.provider + ")...");
@@ -145,7 +153,6 @@ public class HumanifyCmd implements Runnable {
             suggestArgs.addAll(List.of("--model", llm.model));
             suggestArgs.addAll(List.of("--batch", Integer.toString(llm.batch)));
 
-            // 如果 SuggestCmd 有这些字段就透传
             if (hasField(SuggestCmd.class, "maxConcurrent")) {
                 suggestArgs.addAll(List.of("--max-concurrent", Integer.toString(llm.maxConcurrent)));
             }
@@ -161,54 +168,65 @@ public class HumanifyCmd implements Runnable {
                 suggestArgs.addAll(List.of("--timeout-sec", Integer.toString(llm.timeoutSec)));
             }
 
-            // 位置参数: snippets.json -> mapping.json
             suggestArgs.add(snippets.toString());
             suggestArgs.add(mapping.toString());
 
             int rc2 = new CommandLine(new SuggestCmd()).execute(suggestArgs.toArray(new String[0]));
-            if (rc2 != 0) {
-                throw new IllegalStateException("suggest failed with code " + rc2);
-            }
-            if (!Files.exists(mapping) || Files.size(mapping) == 0) {
+            if (rc2 != 0) throw new IllegalStateException("suggest failed with code " + rc2);
+            if (!Files.exists(mapping) || Files.size(mapping) == 0)
                 throw new IllegalStateException("mapping.json was not produced: " + mapping);
-            }
 
             /* ========== 3/5 apply ========== */
             System.out.println("[humanify] 3/5 apply...");
             List<String> applyArgs = new ArrayList<>();
             if (classpath != null && !classpath.isEmpty() && hasField(ApplyCmd.class, "classpath")) {
                 applyArgs.add("--classpath");
-                applyArgs.add(
-                        classpath.stream()
-                                .collect(Collectors.joining(":"))
-                );
+                applyArgs.add(classpath.stream().collect(Collectors.joining(":")));
             }
-            // 位置参数: <SRC_DIR> <mapping.json> <OUT_DIR>
             applyArgs.add(src.toString());
             applyArgs.add(mapping.toString());
             applyArgs.add(out.toString());
 
             int rc3 = new CommandLine(new ApplyCmd()).execute(applyArgs.toArray(new String[0]));
-            if (rc3 != 0) {
-                throw new IllegalStateException("apply failed with code " + rc3);
+            if (rc3 != 0) throw new IllegalStateException("apply failed with code " + rc3);
+
+            /* ========== 3.5/5 package-refactor (可选) ========== */
+            if (renamePackages) {
+                System.out.println("[humanify] 3.5/5 package-refactor...");
+                List<String> pkgArgs = new ArrayList<>();
+                pkgArgs.add("--src"); pkgArgs.add(out.toString());
+                pkgArgs.add("--mode"); pkgArgs.add(packageRenameMode != null ? packageRenameMode : "llm");
+                if (packageRenameSkip != null && !packageRenameSkip.isBlank()) {
+                    pkgArgs.add("--skip-pattern"); pkgArgs.add(packageRenameSkip);
+                }
+                if (packageRenameLeafOnly) {
+                    pkgArgs.add("--leaf-only");
+                }
+                pkgArgs.add("--provider"); pkgArgs.add(llm.provider != null ? llm.provider : "dummy");
+                pkgArgs.add("--model");    pkgArgs.add(llm.model != null ? llm.model : "gpt-4o-mini");
+                pkgArgs.add("--batch");    pkgArgs.add(Integer.toString(llm.batch));
+                pkgArgs.add("--max-concurrent"); pkgArgs.add(Integer.toString(llm.maxConcurrent));
+                if (llm.endpoint != null && !llm.endpoint.isBlank()) { pkgArgs.add("--endpoint"); pkgArgs.add(llm.endpoint); }
+                if (llm.localApi != null && !llm.localApi.isBlank()) { pkgArgs.add("--local-api"); pkgArgs.add(llm.localApi); }
+                pkgArgs.add("--timeout-sec"); pkgArgs.add(Integer.toString(llm.timeoutSec > 0 ? llm.timeoutSec : 180));
+
+                int rcPkg = new CommandLine(new PackageRefactorCmd()).execute(pkgArgs.toArray(new String[0]));
+                if (rcPkg != 0) throw new IllegalStateException("package-refactor failed with code " + rcPkg);
             }
 
             /* ========== 4/5 annotate ========== */
             System.out.println("[humanify] 4/5 annotate...");
 
             List<String> annArgs = new ArrayList<>();
-            // 我们的 AnnotateCmd 是分批版，参数是 flag 风格
             annArgs.add("--src");   annArgs.add(out.toString());
             annArgs.add("--lang");  annArgs.add(lang != null ? lang : "en");
             annArgs.add("--style"); annArgs.add(style != null ? style : "concise");
 
-            // LLM 相关透传
             annArgs.add("--provider"); annArgs.add(llm.provider != null ? llm.provider : "dummy");
             annArgs.add("--model");    annArgs.add(llm.model != null ? llm.model : "gpt-4o-mini");
             annArgs.add("--batch");    annArgs.add(Integer.toString(llm.batch));
             annArgs.add("--max-concurrent"); annArgs.add(Integer.toString(llm.maxConcurrent));
 
-            // endpoint / local-api / timeoutSec 这些 AnnotateCmd 里的 DocClient 也会需要
             if ("local".equalsIgnoreCase(llm.provider)) {
                 if (llm.localApi != null && !llm.localApi.isEmpty()) {
                     annArgs.add("--local-api"); annArgs.add(llm.localApi);
@@ -226,7 +244,6 @@ public class HumanifyCmd implements Runnable {
                 annArgs.add("--timeout-sec"); annArgs.add(Integer.toString(llm.timeoutSec > 0 ? llm.timeoutSec : 180));
             }
 
-            // 分批 annotate 的控制参数
             annArgs.add("--annotate-batch-size"); annArgs.add(Integer.toString(annotateBatchSize));
             if (annotateTempRoot != null && !annotateTempRoot.isEmpty()) {
                 annArgs.add("--annotate-temp-root"); annArgs.add(annotateTempRoot);
@@ -236,15 +253,11 @@ public class HumanifyCmd implements Runnable {
             }
 
             int rc4 = new CommandLine(new AnnotateCmd()).execute(annArgs.toArray(new String[0]));
-            if (rc4 != 0) {
-                throw new IllegalStateException("annotate failed with code " + rc4);
-            }
+            if (rc4 != 0) throw new IllegalStateException("annotate failed with code " + rc4);
 
             /* ========== 5/5 format ========== */
             System.out.println("[humanify] 5/5 format...");
             try {
-                // 新版 Formatter 在内部会自己 fork 子进程，并自动加 --add-exports
-                // 用户主进程不用再写那些很长的 JVM 参数
                 Formatter.formatJava(out);
                 System.out.println("[humanify] formatted output.");
             } catch (Throwable t) {
@@ -264,19 +277,7 @@ public class HumanifyCmd implements Runnable {
     }
 
     private static boolean hasField(Class<?> cls, String name) {
-        try {
-            cls.getDeclaredField(name);
-            return true;
-        } catch (NoSuchFieldException e) {
-            return false;
-        }
-    }
-
-    @SuppressWarnings("unused")
-    private static void safeDelete(Path p) {
-        try {
-            Files.deleteIfExists(p);
-        } catch (Exception ignore) {
-        }
+        try { cls.getDeclaredField(name); return true; }
+        catch (NoSuchFieldException e) { return false; }
     }
 }

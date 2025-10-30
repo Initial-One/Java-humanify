@@ -5,27 +5,20 @@ import picocli.CommandLine;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
  * humanify-apk:
- *   1) apktool (bundled) decode APK -> resources/smali (for reference)
- *   2) jadx (bundled)   decompile APK -> raw Java sources
- *   3) humanify         run analyze → suggest → apply → annotate
- *
- * Bundled tools:
- *   - /tools/apktool/apktool.jar
- *   - /tools/jadx/jadx-cli.jar
- *   (Optionally provide .sha256 alongside to enable integrity verification)
+ *   1) apktool (bundled or system) decode APK -> resources/smali (for reference)
+ *   2) jadx    (bundled or system) decompile APK -> raw Java sources
+ *   3) humanify (analyze → suggest → apply → [package-refactor?] → annotate → format)
  */
 @CommandLine.Command(
         name = "humanify-apk",
         aliases = {"apk", "apk-humanify", "from-apk", "apk2human"},
-        description = "apktool decode → jadx decompile → humanify (analyze/suggest/apply/annotate) in one go"
+        description = "apktool decode → jadx decompile → humanify (analyze/suggest/apply/[package-refactor?]/annotate/format) in one go"
 )
 public class HumanifyApkCmd implements Runnable {
 
@@ -37,10 +30,10 @@ public class HumanifyApkCmd implements Runnable {
     String outDir;
 
     /* Tooling override */
-    @CommandLine.Option(names = "--apktool", description = "Override apktool path/jar; if absent, use bundled")
+    @CommandLine.Option(names = "--apktool", description = "Override apktool path/jar; if absent, use bundled or system")
     String apktoolOverride;
 
-    @CommandLine.Option(names = "--jadx", description = "Override jadx path/jar; if absent, use bundled")
+    @CommandLine.Option(names = "--jadx", description = "Override jadx path/jar; if absent, try bundled, then system PATH")
     String jadxOverride;
 
     @CommandLine.Option(names = "--stage-tools", description = "Custom staging dir for bundled tools (default: ~/.jhumanify/tools)")
@@ -51,7 +44,7 @@ public class HumanifyApkCmd implements Runnable {
     boolean verifyChecksums;
 
     /* Flow control */
-    @CommandLine.Option(names = "--work", description = "Working dir (default: <OUT_DIR>/.work)")
+    @CommandLine.Option(names = "--work", description = "Working dir (default: work; sibling of <OUT_DIR>")
     String workDir;
 
     @CommandLine.Option(names = "--skip-apktool", defaultValue = "false", description = "Skip apktool step")
@@ -76,28 +69,45 @@ public class HumanifyApkCmd implements Runnable {
     @CommandLine.Option(names="--endpoint", defaultValue="http://localhost:11434", description="Local endpoint (OpenAI-compat or Ollama)")
     String endpoint;
 
-    @CommandLine.Option(names="--timeout-sec", defaultValue="180", description="HTTP read/call timeout seconds for local provider")
+    @CommandLine.Option(names="--timeout-sec", defaultValue="180", description="HTTP read/call timeout seconds")
     int timeoutSec;
 
-    @CommandLine.Option(names="--batch", defaultValue="12", description="Max snippets per LLM batch")
+    @CommandLine.Option(names="--batch", defaultValue="100", description="Max snippets per LLM batch")
     int batch;
 
     @CommandLine.Option(names="--max-concurrent", defaultValue="100", description="Max concurrent LLM calls")
     int maxConcurrent;
 
-    @CommandLine.Option(names="--jadx-xmx", defaultValue="4096", description="Max heap (MB) for bundled jadx java -Xmx (default: ${DEFAULT-VALUE})")
+    @CommandLine.Option(names="--jadx-xmx", defaultValue="4096", description="Max heap (MB) for java -Xmx when running jadx (default: ${DEFAULT-VALUE})")
     int jadxXmxMb;
 
     /* Apply/Annotate extras */
     @CommandLine.Option(names="--classpath", split = ":", description = "Extra classpath jars/dirs, separated by ':'")
-    java.util.List<String> classpath = new java.util.ArrayList<>();
+    List<String> classpath = new ArrayList<>();
 
     @CommandLine.Option(names = {"--lang"}, defaultValue = "en", description = "Javadoc language: zh|en (default: ${DEFAULT-VALUE})")
     String lang;
 
-    @CommandLine.Option(names = "--style", defaultValue = "short",
-            description = "Javadoc style: short|minimal|detailed (default: ${DEFAULT-VALUE})")
+    @CommandLine.Option(names = "--style", defaultValue = "concise",
+            description = "Javadoc style: concise|detailed (default: ${DEFAULT-VALUE})")
     String style;
+
+    /* === 新增：包/目录语义化重命名（透传到 humanify） === */
+    @CommandLine.Option(names="--rename-packages", defaultValue = "false",
+            description = "Rename obfuscated package/folder names via LLM/heuristic (runs between apply & annotate)")
+    boolean renamePackages;
+
+    @CommandLine.Option(names="--package-rename-mode", defaultValue = "llm",
+            description = "llm|heuristic for package/folder rename (default: ${DEFAULT-VALUE})")
+    String packageRenameMode;
+
+    @CommandLine.Option(names="--package-rename-skip",
+            description = "Regex to skip packages (e.g. ^(androidx?|com\\.google|org)\\b)")
+    String packageRenameSkip;
+
+    @CommandLine.Option(names="--package-rename-leaf-only", defaultValue = "true",
+            description = "Only rename the leaf segment of the package path (default: ${DEFAULT-VALUE})")
+    boolean packageRenameLeafOnly;
 
     @Override
     public void run() {
@@ -107,18 +117,15 @@ public class HumanifyApkCmd implements Runnable {
             throw new CommandLine.ParameterException(new CommandLine(this),
                     "APK not found: " + apk.toAbsolutePath());
         }
-        try {
-            Files.createDirectories(out);
-        } catch (IOException e) {
+        try { Files.createDirectories(out); }
+        catch (IOException e) {
             throw new CommandLine.ParameterException(new CommandLine(this),
                     "Cannot create output dir: " + out.toAbsolutePath());
         }
 
-        Path work = (workDir == null || workDir.isEmpty())
-                ? out.resolve(".work")
-                : Paths.get(workDir);
+        Path work = resolveWorkDir(out, workDir);
         Path apktoolOut = work.resolve("apktool");
-        Path srcRaw = work.resolve("src_raw");
+        Path srcRaw = work.resolve("src_raw"); // 将会包含 'sources' 子目录（jadx 默认）
 
         long t0 = System.currentTimeMillis();
         System.out.println("[humanify-apk] apk = " + apk.toAbsolutePath());
@@ -128,7 +135,7 @@ public class HumanifyApkCmd implements Runnable {
         try {
             Files.createDirectories(work);
 
-            // Resolve tools: prefer overrides; otherwise use bundled
+            // Resolve tools: prefer overrides; otherwise use bundled or system
             ToolResolver resolver = new ToolResolver(
                     stageToolsDir == null || stageToolsDir.isEmpty()
                             ? ToolResolver.defaultStageDir()
@@ -155,8 +162,9 @@ public class HumanifyApkCmd implements Runnable {
 
             // 3) humanify
             System.out.println("[humanify-apk] 3/3 humanify...");
+            Path javaRoot = resolveJavaRoot(srcRaw);
             List<String> humanifyArgs = new ArrayList<>();
-            humanifyArgs.add(srcRaw.toString());
+            humanifyArgs.add(javaRoot.toString());
             humanifyArgs.add(out.toString());
 
             // Pass-through LLM options
@@ -167,6 +175,14 @@ public class HumanifyApkCmd implements Runnable {
             humanifyArgs.add("--local-api"); humanifyArgs.add(localApi);
             humanifyArgs.add("--endpoint");  humanifyArgs.add(endpoint);
             humanifyArgs.add("--timeout-sec"); humanifyArgs.add(Integer.toString(timeoutSec));
+
+            // Package rename 开关透传
+            if (renamePackages) humanifyArgs.add("--rename-packages");
+            humanifyArgs.add("--package-rename-mode"); humanifyArgs.add(packageRenameMode != null ? packageRenameMode : "llm");
+            if (packageRenameSkip != null && !packageRenameSkip.isBlank()) {
+                humanifyArgs.add("--package-rename-skip"); humanifyArgs.add(packageRenameSkip);
+            }
+            if (packageRenameLeafOnly) humanifyArgs.add("--package-rename-leaf-only");
 
             // Apply/Annotate extras
             if (!classpath.isEmpty()) {
@@ -190,9 +206,7 @@ public class HumanifyApkCmd implements Runnable {
             System.exit(2);
         } finally {
             if (!keepWork) {
-                try {
-                    deleteRecursive(work.toFile());
-                } catch (Exception ignore) {}
+                try { deleteRecursive(work.toFile()); } catch (Exception ignore) {}
             }
         }
     }
@@ -201,17 +215,20 @@ public class HumanifyApkCmd implements Runnable {
         Files.createDirectories(out.getParent() == null ? Paths.get(".") : out.getParent());
         List<String> cmd;
         if (apktoolOverride != null && !apktoolOverride.isEmpty()) {
-            // honor user override
             if (apktoolOverride.toLowerCase().endsWith(".jar") || new File(apktoolOverride).getName().endsWith(".jar")) {
                 cmd = List.of("java", "-jar", apktoolOverride, "d", "-f", "-o", out.toString(), apk.toString());
             } else {
                 cmd = List.of(apktoolOverride, "d", "-f", "-o", out.toString(), apk.toString());
             }
         } else {
-            // use bundled jar
-            ToolResolver.ResolvedTool apktool = resolver.resolveApktool();
-            cmd = new ArrayList<>(apktool.baseCmd);
-            cmd.add("d"); cmd.add("-f"); cmd.add("-o"); cmd.add(out.toString()); cmd.add(apk.toString());
+            try {
+                ToolResolver.ResolvedTool apktool = resolver.resolveApktool();
+                cmd = new ArrayList<>(apktool.baseCmd);
+                cmd.add("d"); cmd.add("-f"); cmd.add("-o"); cmd.add(out.toString()); cmd.add(apk.toString());
+            } catch (Exception e) {
+                // 尝试系统 PATH
+                cmd = List.of("apktool", "d", "-f", "-o", out.toString(), apk.toString());
+            }
         }
         System.out.println("[humanify-apk]   > " + String.join(" ", cmd));
         new ProcessBuilder(cmd).inheritIO().start().waitFor();
@@ -224,47 +241,72 @@ public class HumanifyApkCmd implements Runnable {
         List<String> cmd;
 
         if (jadxOverride != null && !jadxOverride.isEmpty()) {
-            // 用户手动指定了 --jadx
             if (jadxOverride.toLowerCase().endsWith(".jar")) {
-                // 用 jar -> CLI main
                 cmd = new ArrayList<>();
-                cmd.add("java");
-                cmd.add("-Xmx" + jadxXmxMb + "m");
-                cmd.add("-cp");
-                cmd.add(jadxOverride);
+                cmd.add("java"); cmd.add("-Xmx" + jadxXmxMb + "m");
+                cmd.add("-cp"); cmd.add(jadxOverride);
                 cmd.add("jadx.cli.JadxCLI");
-                cmd.add("-d");
-                cmd.add(out.toString());
+                cmd.add("-d"); cmd.add(out.toString());
                 cmd.add(inputApk.toString());
             } else {
-                // 假设它是可执行的二进制/脚本，比如官方 zip 里的 bin/jadx
                 cmd = new ArrayList<>();
                 cmd.add(jadxOverride);
-                cmd.add("-d");
-                cmd.add(out.toString());
+                cmd.add("-d"); cmd.add(out.toString());
                 cmd.add(inputApk.toString());
             }
         } else {
-            // 用我们内置的打包版本
-            ToolResolver.ResolvedTool bundled = resolver.resolveJadx();
-            String stagedJar = bundled.executable.toString();
-
-            cmd = new ArrayList<>();
-            cmd.add("java");
-            cmd.add("-Xmx" + jadxXmxMb + "m");
-            cmd.add("-cp");
-            cmd.add(stagedJar);
-            cmd.add("jadx.cli.JadxCLI");
-            cmd.add("-d");
-            cmd.add(out.toString());
-            cmd.add(inputApk.toString());
+            try {
+                ToolResolver.ResolvedTool bundled = resolver.resolveJadx();
+                String stagedJar = bundled.executable.toString();
+                cmd = new ArrayList<>();
+                cmd.add("java"); cmd.add("-Xmx" + jadxXmxMb + "m");
+                cmd.add("-cp"); cmd.add(stagedJar);
+                cmd.add("jadx.cli.JadxCLI");
+                cmd.add("-d"); cmd.add(out.toString());
+                cmd.add(inputApk.toString());
+            } catch (Exception e) {
+                // fallback: 系统 PATH
+                String[] candidates = {"jadx", "jadx.sh", "jadx.bat"};
+                String found = null;
+                for (String c : candidates) {
+                    try {
+                        Process p = new ProcessBuilder(c, "--version").redirectErrorStream(true).start();
+                        if (p.waitFor() == 0) { found = c; break; }
+                    } catch (IOException ignore) {}
+                }
+                if (found == null) throw new IllegalStateException("No bundled or system jadx found. Please install jadx or provide --jadx.");
+                cmd = new ArrayList<>();
+                cmd.add(found);
+                cmd.add("-d"); cmd.add(out.toString());
+                cmd.add(inputApk.toString());
+            }
         }
 
         System.out.println("[humanify-apk]   > " + String.join(" ", cmd));
         new ProcessBuilder(cmd).inheritIO().start().waitFor();
 
-        if (!Files.isDirectory(out) || !Files.exists(out.resolve("sources"))) {
-            System.err.println("[humanify-apk] WARNING: Jadx did not produce expected 'sources' folder in: " + out);
+        if (!Files.isDirectory(out)) {
+            System.err.println("[humanify-apk] WARNING: Jadx output dir not found: " + out);
+        }
+    }
+
+    private static Path resolveJavaRoot(Path srcRaw) throws IOException {
+        Path candidate = srcRaw.resolve("sources");
+        if (Files.isDirectory(candidate)) return candidate;
+        // 若 srcRaw 自身包含 .java 则直接用它
+        try (var s = Files.walk(srcRaw, 1)) {
+            boolean hasJava = s.anyMatch(p -> p.toString().endsWith(".java"));
+            if (hasJava) return srcRaw;
+        }
+        // 否则返回第一个包含 .java 的子目录
+        try (var s = Files.walk(srcRaw, 2)) {
+            return s.filter(Files::isDirectory)
+                    .filter(d -> {
+                        try (var s2 = Files.walk(d, 1)) {
+                            return s2.anyMatch(p -> p.toString().endsWith(".java"));
+                        } catch (IOException e) { return false; }
+                    })
+                    .findFirst().orElse(candidate);
         }
     }
 
@@ -272,10 +314,18 @@ public class HumanifyApkCmd implements Runnable {
         if (file == null || !file.exists()) return;
         if (file.isDirectory()) {
             File[] children = file.listFiles();
-            if (children != null) {
-                for (File c : children) deleteRecursive(c);
-            }
+            if (children != null) for (File c : children) deleteRecursive(c);
         }
         file.delete();
+    }
+
+    private static Path resolveWorkDir(Path out, String override) {
+        if (override != null && !override.isBlank()) {
+            return Paths.get(override);
+        }
+        // 默认与 out 同级：<outParent>/<outName>.work
+        Path parent = out.getParent() != null ? out.getParent() : Paths.get(".");
+        String name = out.getFileName() != null ? out.getFileName().toString() : "out";
+        return parent.resolve( "work");
     }
 }

@@ -5,21 +5,31 @@ import picocli.CommandLine;
 
 @CommandLine.Command(
         name = "jhumanify",
-        version = "0.4.0",
+        version = "0.5.0",
         mixinStandardHelpOptions = true,
         usageHelpAutoWidth = true,
         sortOptions = false,
         description = {
-                "Deobfuscate Java with LLMs. Typical flow:",
-                "  analyze → suggest → apply → annotate",
+                "Humanify / deobfuscate Java and APKs with LLMs.",
+                "",
+                "Typical source flow:",
+                "  analyze → suggest → apply → annotate → [package-refactor] → format",
+                "",
+                "APK one-shot:",
+                "  humanify-apk  (apk → Java source → humanified names → Javadoc → optional package rename)",
                 "",
                 "Providers: dummy | openai | local | deepseek",
                 "Local provider: --local-api openai|ollama + --endpoint http://host:port",
-                "Env: OPENAI_API_KEY / OPENAI_BASE_URL / DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL"
+                "",
+                "Env:",
+                "  OPENAI_API_KEY / OPENAI_BASE_URL",
+                "  DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL",
+                "",
+                "Use --rename-packages to also rename obfuscated package folders via LLM."
         },
         subcommands = {
                 HumanifyApkCmd.class,DecompileCmd.class, AnalyzeCmd.class, SuggestCmd.class,
-                ApplyCmd.class, HumanifyCmd.class, AnnotateCmd.class
+                ApplyCmd.class, HumanifyCmd.class, AnnotateCmd.class, PackageRefactorCmd.class
         }
 )
 public class Main implements Runnable {

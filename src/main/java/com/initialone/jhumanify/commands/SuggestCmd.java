@@ -1,20 +1,13 @@
 package com.initialone.jhumanify.commands;
 
-import com.initialone.jhumanify.llm.DeepSeekClient;
-import com.initialone.jhumanify.llm.LlmClient;
 import com.initialone.jhumanify.llm.LlmOptions;
-import com.initialone.jhumanify.llm.OpenAiClient;
 import com.initialone.jhumanify.model.RenameSuggestion;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import okhttp3.*;
 import picocli.CommandLine;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -24,13 +17,14 @@ import java.util.stream.Collectors;
 
 @CommandLine.Command(
         name = "suggest",
-        description = "Generate rename mapping from snippets.json via OpenAI or local heuristic"
+        description = "Generate rename mapping from snippets.json via OpenAI / DeepSeek / Local or heuristic"
 )
 public class SuggestCmd implements Runnable {
     @CommandLine.Mixin
     LlmOptions llm;
 
     int codeLines = 50;
+
     @CommandLine.Parameters(index = "0", description = "Input snippets.json (from analyze)")
     String snippetsJson;
 
@@ -41,9 +35,21 @@ public class SuggestCmd implements Runnable {
             description = "Approx tokens per LLM batch (rough estimate)")
     int tokenBudget;
 
-    @CommandLine.Option(names = "--retries", defaultValue = "3",
-            description = "Transient network retries for each LLM call")
+    @CommandLine.Option(names = "--retries", defaultValue = "6",
+            description = "Transient network retries for each LLM call (default: ${DEFAULT-VALUE})")
     int retries;
+
+    @CommandLine.Option(names = "--retry-initial-ms", defaultValue = "800",
+            description = "Initial backoff for retry in milliseconds")
+    long retryInitialMs;
+
+    @CommandLine.Option(names = "--retry-multiplier", defaultValue = "1.8",
+            description = "Exponential backoff multiplier")
+    double retryMultiplier;
+
+    @CommandLine.Option(names = "--retry-jitter-ms", defaultValue = "300",
+            description = "Random jitter added to backoff in milliseconds")
+    long retryJitterMs;
 
     /* ======== 输入数据结构 ======== */
     static class Snippet {
@@ -61,10 +67,10 @@ public class SuggestCmd implements Runnable {
 
     /** 输出映射（精确键） */
     public static class Mapping {
-        public Map<String,String> simple   = new LinkedHashMap<>();
-        public Map<String,String> classFqn = new LinkedHashMap<>();
-        public Map<String,String> fieldFqn = new LinkedHashMap<>();
-        public Map<String,String> methodSig= new LinkedHashMap<>();
+        public Map<String,String> simple    = new LinkedHashMap<>();
+        public Map<String,String> classFqn  = new LinkedHashMap<>();
+        public Map<String,String> fieldFqn  = new LinkedHashMap<>();
+        public Map<String,String> methodSig = new LinkedHashMap<>();
     }
 
     /* ======== 键上锁（只允许这些键） ======== */
@@ -114,7 +120,7 @@ public class SuggestCmd implements Runnable {
             Allowed allow = buildAllowed(snippets);
             mapping = sanitizeAndFill(mapping, allow, snippets);
 
-            // 3) 统一写盘（只写一次）
+            // 3) 统一写盘（不中断，即使部分批次失败，也会写出已有结果）
             om.writeValue(Path.of(mappingJson).toFile(), mapping);
             System.out.println("[suggest] mapping -> " + mappingJson);
         } catch (Exception e) {
@@ -162,25 +168,19 @@ public class SuggestCmd implements Runnable {
             return suggestHeuristically(snippets);
         }
 
-        // 1) 准备带 META 的片段（截断头/尾）
         List<String> blocks = snippets.stream()
                 .map(s -> formatSnippetBlockTruncated(s, codeLines, codeLines))
                 .toList();
 
-        // 2) 统一 LLM 客户端；但分批并发在本类实现
         com.initialone.jhumanify.llm.LlmClient client =
-                new com.initialone.jhumanify.llm.OpenAiClient(apiKey, model, batchSize);
+                new com.initialone.jhumanify.llm.OpenAiClient(apiKey, model, batchSize); // ← 修复：使用 OpenAiClient
 
-        List<RenameSuggestion> items = callInBatches(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent, retries);
+        List<RenameSuggestion> items =
+                callInBatches(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent);
 
-        // 3) 结构化 -> Mapping
         Mapping raw = suggestionsToMapping(items, snippets);
-
-        // 4) 键上锁 + 清洗
         Allowed allow = buildAllowed(snippets);
-        Mapping cleaned = sanitizeAndFill(raw, allow, snippets);
-
-        return cleaned;
+        return sanitizeAndFill(raw, allow, snippets);
     }
 
     /* ================== DeepSeek provider ================== */
@@ -194,24 +194,16 @@ public class SuggestCmd implements Runnable {
         }
 
         com.initialone.jhumanify.llm.LlmClient client =
-                new com.initialone.jhumanify.llm.DeepSeekClient(apiKey, model, batchSize);
+                new com.initialone.jhumanify.llm.DeepSeekClient(apiKey, model, batchSize, llm.timeoutSec);
 
         List<String> blocks = snippets.stream()
                 .map(s -> formatSnippetBlockTruncated(s, codeLines, codeLines))
                 .toList();
 
-        List<com.initialone.jhumanify.model.RenameSuggestion> items =
-                callInBatchesRaw(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent, retries);
+        List<RenameSuggestion> items =
+                callInBatches(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent);
 
-        Mapping m0 = suggestionsToMapping(
-                items.stream().map(r -> {
-                    RenameSuggestion x = new RenameSuggestion();
-                    x.kind = r.kind; x.oldName = r.oldName; x.newName = r.newName;
-                    return x;
-                }).toList(),
-                snippets
-        );
-        return m0;
+        return suggestionsToMapping(items, snippets);
     }
 
     /* ================== Local provider (openai-compat / ollama) ================== */
@@ -227,23 +219,14 @@ public class SuggestCmd implements Runnable {
                 .map(s -> formatSnippetBlockTruncated(s, codeLines, codeLines))
                 .toList();
 
-        List<com.initialone.jhumanify.model.RenameSuggestion> items =
-                callInBatchesRaw(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent, retries);
+        List<RenameSuggestion> items =
+                callInBatches(client, blocks, tokenBudget, llm.batch, llm.maxConcurrent);
 
-        List<RenameSuggestion> items2 = items.stream().map(r -> {
-            RenameSuggestion z = new RenameSuggestion();
-            z.kind = r.kind; z.oldName = r.oldName; z.newName = r.newName;
-            return z;
-        }).toList();
-
-        Mapping m0 = suggestionsToMapping(items2, snippets);
-        return m0;
+        return suggestionsToMapping(items, snippets);
     }
 
     private String formatSnippetBlock(Snippet s) {
         StringBuilder sb = new StringBuilder();
-
-        // === 清晰的结构化头（LLM 主要依据这里提取 old 名称）===
         sb.append("// META\n");
         sb.append("packageName: ").append(nvl(s.pkg)).append("\n");
         sb.append("className: ").append(nvl(s.className)).append("\n");
@@ -257,12 +240,9 @@ public class SuggestCmd implements Runnable {
             sb.append("strings: ").append(String.join(" | ", s.strings.stream().limit(8).toList())).append("\n");
         }
         sb.append("\n");
-
-        // === 代码体 ===
         sb.append("```java\n")
                 .append(s.code == null ? "" : s.code)
                 .append("\n```\n");
-
         return sb.toString();
     }
 
@@ -360,17 +340,8 @@ public class SuggestCmd implements Runnable {
     }
 
     private static String nvl(String s) { return s == null ? "" : s; }
-    private static void putClassRenameIfAbsent(Map<String,String> map, String oldFqn, String newFqn) {
-        if (oldFqn == null || newFqn == null || oldFqn.equals(newFqn)) return;
-        map.putIfAbsent(oldFqn, newFqn);
-    }
-    private static String simpleToPkg(String fqn, String newSimple) {
-        if (fqn == null || fqn.isBlank()) return newSimple;
-        int i = fqn.lastIndexOf('.');
-        return i < 0 ? newSimple : fqn.substring(0, i) + "." + newSimple;
-    }
 
-    /* ======== 批量并发 + 重试 ======== */
+    /* ======== 批量并发 + “不崩溃”重试 ======== */
 
     private static int approxTokens(String s) {
         // 粗估：1 token ≈ 3.5 字符（足够做分批）
@@ -394,11 +365,11 @@ public class SuggestCmd implements Runnable {
         return batches;
     }
 
-    // LlmClient.suggestRenames(List<String>) -> List<RenameSuggestion>
+    // —— 核心：任何一批失败都不会抛异常，只记录错误并返回空列表，流水线继续 ——
     private List<RenameSuggestion> callInBatches(
             com.initialone.jhumanify.llm.LlmClient client,
             List<String> blocks,
-            int tokenBudget, int maxItemsPerBatch, int maxConcurrent, int retries
+            int tokenBudget, int maxItemsPerBatch, int maxConcurrent
     ) throws Exception {
         List<List<String>> batches = batchByBudget(blocks, SuggestCmd::approxTokens, tokenBudget, maxItemsPerBatch);
         System.out.println("[suggest] total blocks=" + blocks.size() + ", batches=" + batches.size());
@@ -409,14 +380,26 @@ public class SuggestCmd implements Runnable {
             for (List<String> b : batches) {
                 futures.add(pool.submit(() -> {
                     int i = idx.incrementAndGet();
-                    System.out.println("[suggest] LLM batch " + i + "/" + batches.size() + " items=" + b.size());
-                    return withRetry(retries, 400, () -> client.suggestRenames(b));
+                    String tag = "LLM batch " + i + "/" + batches.size() + " items=" + b.size();
+                    System.out.println("[suggest] " + tag);
+                    // 不抛异常的重试：失败返回 null/empty
+                    List<RenameSuggestion> part = withRetrySilently(retries, retryInitialMs, retryMultiplier, retryJitterMs,
+                            () -> client.suggestRenames(b), tag);
+                    if (part == null) return Collections.emptyList();
+                    return part;
                 }));
             }
             List<RenameSuggestion> all = new ArrayList<>();
             for (Future<List<RenameSuggestion>> f : futures) {
-                List<RenameSuggestion> part = f.get();
-                if (part != null) all.addAll(part);
+                try {
+                    List<RenameSuggestion> part = f.get();
+                    if (part != null) all.addAll(part);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException ee) {
+                    // 理论上不会到这里（任务内部吞了异常），保险起见仍然不中断
+                    System.err.println("[suggest] batch future failed: " + ee.getCause());
+                }
             }
             return all;
         } finally {
@@ -424,11 +407,11 @@ public class SuggestCmd implements Runnable {
         }
     }
 
-    // 对 deepseek/local 的 RenameSuggestion 原型（若 client 返回你自定义的类型）
+    // 兼容某些 client 返回自定义类型时的批处理（同样不抛异常）
     private <T> List<T> callInBatchesRaw(
             com.initialone.jhumanify.llm.LlmClient client,
             List<String> blocks,
-            int tokenBudget, int maxItemsPerBatch, int maxConcurrent, int retries
+            int tokenBudget, int maxItemsPerBatch, int maxConcurrent
     ) throws Exception {
         List<List<String>> batches = batchByBudget(blocks, SuggestCmd::approxTokens, tokenBudget, maxItemsPerBatch);
         System.out.println("[suggest] total blocks=" + blocks.size() + ", batches=" + batches.size());
@@ -439,16 +422,25 @@ public class SuggestCmd implements Runnable {
             for (List<String> b : batches) {
                 futures.add(pool.submit(() -> {
                     int i = idx.incrementAndGet();
-                    System.out.println("[suggest] LLM batch " + i + "/" + batches.size() + " items=" + b.size());
+                    String tag = "LLM batch " + i + "/" + batches.size() + " items=" + b.size();
+                    System.out.println("[suggest] " + tag);
                     @SuppressWarnings("unchecked")
-                    List<T> part = (List<T>) withRetry(retries, 400, () -> client.suggestRenames(b));
+                    List<T> part = withRetrySilently(retries, retryInitialMs, retryMultiplier, retryJitterMs,
+                            () -> (List<T>) client.suggestRenames(b), tag);
+                    if (part == null) return Collections.emptyList();
                     return part;
                 }));
             }
             List<T> all = new ArrayList<>();
             for (Future<List<T>> f : futures) {
-                List<T> part = f.get();
-                if (part != null) all.addAll(part);
+                try {
+                    List<T> part = f.get();
+                    if (part != null) all.addAll(part);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException ee) {
+                    System.err.println("[suggest] batch future failed: " + ee.getCause());
+                }
             }
             return all;
         } finally {
@@ -456,20 +448,51 @@ public class SuggestCmd implements Runnable {
         }
     }
 
-    private static <T> T withRetry(int maxAttempts, long baseBackoffMs, Callable<T> op) throws Exception {
-        int attempts = 0;
-        long backoff = baseBackoffMs;
-        while (true) {
-            try { return op.call(); }
-            catch (IOException e) {
-                boolean transientErr =
-                        (e instanceof java.io.EOFException) ||
-                                (e instanceof java.net.SocketTimeoutException) ||
-                                (e instanceof java.net.ProtocolException);
-                if (!transientErr || ++attempts >= Math.max(1, maxAttempts)) throw e;
-                Thread.sleep(backoff);
-                backoff = Math.min(backoff * 2, 4000);
+    /* ============ 重试封装（不抛异常版） ============ */
+    private static <T> T withRetrySilently(int maxAttempts,
+                                           long initialBackoffMs,
+                                           double multiplier,
+                                           long jitterMs,
+                                           Callable<T> op,
+                                           String tag) {
+        long backoff = initialBackoffMs;
+        Throwable last = null;
+        for (int attempt = 1; attempt <= Math.max(1, maxAttempts); attempt++) {
+            try {
+                return op.call();
+            } catch (Throwable t) {
+                last = t;
+                boolean retryable = isTransient(t);
+                if (!retryable) {
+                    System.err.printf("[suggest] %s non-retryable error: %s%n", tag, t.toString());
+                    return null;
+                }
+                long jitter = 0;
+                try {
+                    jitter = java.util.concurrent.ThreadLocalRandom.current().nextLong(Math.max(0, jitterMs) + 1);
+                } catch (Throwable ignore) {}
+                long sleep = backoff + jitter;
+                System.err.printf("[suggest] %s attempt %d/%d failed: %s; backoff %dms%n",
+                        tag, attempt, maxAttempts, t.toString(), sleep);
+                try { Thread.sleep(sleep); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return null; }
+                backoff = (long) Math.min(30_000, backoff * Math.max(1.0, multiplier));
             }
         }
+        System.err.printf("[suggest] %s giving up after %d attempts: %s%n", tag, maxAttempts, last == null ? "unknown" : last.toString());
+        return null;
+    }
+
+    private static boolean isTransient(Throwable t) {
+        String s = String.valueOf(t).toLowerCase();
+        return (t instanceof java.io.InterruptedIOException)           // 超时/中断
+                || (t instanceof java.net.SocketTimeoutException)
+                || (t instanceof java.net.ProtocolException)
+                || s.contains("stream was reset")
+                || s.contains("cancel") || s.contains("canceled")
+                || s.contains("timeout")
+                || s.contains("connection reset")
+                || s.contains("refused")
+                || s.contains("unavailable")
+                || s.contains("temporary");
     }
 }
